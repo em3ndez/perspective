@@ -97,6 +97,13 @@ class Row extends HTMLElement {
         filter_operand.addEventListener("keyup", this._callback.bind(this));
     }
 
+    /**
+     * Display a dropdown containing possible choices for the filter value, if
+     * the filter value is a string.
+     *
+     * @param {Array[String]} choices An array of strings representing unique
+     * values in the filtered column.
+     */
     choices(choices) {
         const filter_operand = this.shadowRoot.querySelector("#filter_operand");
         const filter_operator = this.shadowRoot.querySelector("#filter_operator");
