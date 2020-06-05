@@ -43,8 +43,8 @@ class TestView(object):
         }
         assert view.to_records() == [
             {"__ROW_PATH__": [], "a": 4, "b": 6},
-            {"__ROW_PATH__": ["1"], "a": 1, "b": 2},
-            {"__ROW_PATH__": ["3"], "a": 3, "b": 4}
+            {"__ROW_PATH__": [1], "a": 1, "b": 2},
+            {"__ROW_PATH__": [3], "a": 3, "b": 4}
         ]
 
     def test_view_two(self):
@@ -59,8 +59,8 @@ class TestView(object):
         }
         assert view.to_records() == [
             {"2|a": 1, "2|b": 2, "4|a": 3, "4|b": 4, "__ROW_PATH__": []},
-            {"2|a": 1, "2|b": 2, "4|a": None, "4|b": None, "__ROW_PATH__": ["1"]},
-            {"2|a": None, "2|b": None, "4|a": 3, "4|b": 4, "__ROW_PATH__": ["3"]}
+            {"2|a": 1, "2|b": 2, "4|a": None, "4|b": None, "__ROW_PATH__": [1]},
+            {"2|a": None, "2|b": None, "4|a": 3, "4|b": 4, "__ROW_PATH__": [3]}
         ]
 
     def test_view_two_column_only(self):
@@ -245,9 +245,9 @@ class TestView(object):
             {
                 "__ROW_PATH__": []
             }, {
-                "__ROW_PATH__": ["1"]
+                "__ROW_PATH__": [1]
             }, {
-                "__ROW_PATH__": ["3"]
+                "__ROW_PATH__": [3]
             }]
 
     def test_view_specific_column(self):
@@ -316,8 +316,8 @@ class TestView(object):
         )
         assert view.to_records() == [
             {"__ROW_PATH__": []},
-            {"__ROW_PATH__": ["1"]},
-            {"__ROW_PATH__": ["3"]}
+            {"__ROW_PATH__": [1]},
+            {"__ROW_PATH__": [3]}
         ]
 
     def test_view_aggregates_column_order(self):
@@ -353,8 +353,8 @@ class TestView(object):
         )
         assert view.to_records() == [
             {"__ROW_PATH__": [], "a": 2.0, "b": 6},
-            {"__ROW_PATH__": ["1"], "a": 1.0, "b": 2},
-            {"__ROW_PATH__": ["3"], "a": 3.0, "b": 4}
+            {"__ROW_PATH__": [1], "a": 1.0, "b": 2},
+            {"__ROW_PATH__": [3], "a": 3.0, "b": 4}
         ]
 
     def test_view_aggregate_str(self):
@@ -379,7 +379,7 @@ class TestView(object):
         )
         assert view.to_records() == [
             {"__ROW_PATH__": [], "a": 1},
-            {"__ROW_PATH__": ["2019-10-01 11:30:00.000"], "a": 1}
+            {"__ROW_PATH__": [datetime(2019, 10, 1, 11, 30)], "a": 1}
         ]
 
     def test_view_aggregate_datetime_leading_zeroes(self):
@@ -391,7 +391,7 @@ class TestView(object):
         )
         assert view.to_records() == [
             {"__ROW_PATH__": [], "a": 1},
-            {"__ROW_PATH__": ["2019-01-01 05:05:05.000"], "a": 1}
+            {"__ROW_PATH__": [datetime(2019, 1, 1, 5, 5, 5)], "a": 1}
         ]
 
     def test_view_aggregate_multiple_columns(self):
@@ -781,7 +781,7 @@ class TestView(object):
         tbl = Table(data)
         view = tbl.view(row_pivots=["a"])
         assert view.to_dict() == {
-            "__ROW_PATH__": [[], ["1"], ["3"]],
+            "__ROW_PATH__": [[], [1], [3]],
             "a": [4, 1, 3],
             "b": [6, 2, 4]
         }
@@ -808,7 +808,7 @@ class TestView(object):
         tbl = Table(data)
         view = tbl.view(row_pivots=["a"], column_pivots=["b"])
         assert view.to_dict() == {
-            "__ROW_PATH__": [[], ["1"], ["3"]],
+            "__ROW_PATH__": [[], [1], [3]],
             "2|a": [1, 1, None],
             "2|b": [2, 2, None],
             "4|a": [3, None, 3],
