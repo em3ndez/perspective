@@ -1,101 +1,65 @@
-////////////////////////////////////////////////////////////////////////////////
-//
-// Copyright (c) 2018, the Perspective Authors.
-//
-// This file is part of the Perspective library, distributed under the terms
-// of the Apache License 2.0.  The full license can be found in the LICENSE
-// file.
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-use super::containers::dropdown_menu::*;
-use super::modal::ModalLink;
-use super::modal::SetModalLink;
-use crate::model::*;
-use crate::renderer::*;
-use crate::utils::*;
-use crate::*;
-
-use js_intern::*;
 use std::rc::Rc;
+
 use yew::prelude::*;
+
+use crate::config::*;
+use crate::renderer::*;
+use crate::session::Session;
+use crate::ui::{DropDownMenu, DropDownMenuItem};
 
 pub type ExportDropDownMenuItem = DropDownMenuItem<ExportFile>;
 
 #[derive(Properties, PartialEq)]
 pub struct ExportDropDownMenuProps {
     pub renderer: Renderer,
+    pub session: Session,
     pub callback: Callback<ExportFile>,
-
-    #[prop_or_default]
-    weak_link: WeakScope<ExportDropDownMenu>,
-}
-
-impl ModalLink<ExportDropDownMenu> for ExportDropDownMenuProps {
-    fn weak_link(&self) -> &'_ utils::WeakScope<ExportDropDownMenu> {
-        &self.weak_link
-    }
-}
-
-#[derive(Default)]
-pub struct ExportDropDownMenu {
-    title: String,
-    _sub: Option<Subscription>,
-    input_ref: NodeRef,
-    invalid: bool,
 }
 
 pub enum ExportDropDownMenuMsg {
     TitleChange,
 }
 
-fn get_menu_items(name: &str, has_render: bool) -> Vec<ExportDropDownMenuItem> {
-    vec![
-        ExportDropDownMenuItem::OptGroup(
-            "Current View",
-            if has_render {
-                vec![
-                    ExportMethod::Csv.new_file(name),
-                    ExportMethod::Json.new_file(name),
-                    ExportMethod::Arrow.new_file(name),
-                    ExportMethod::Html.new_file(name),
-                    ExportMethod::Png.new_file(name),
-                ]
-            } else {
-                vec![
-                    ExportMethod::Csv.new_file(name),
-                    ExportMethod::Json.new_file(name),
-                    ExportMethod::Arrow.new_file(name),
-                    ExportMethod::Html.new_file(name),
-                ]
-            },
-        ),
-        ExportDropDownMenuItem::OptGroup("All", vec![
-            ExportMethod::CsvAll.new_file(name),
-            ExportMethod::JsonAll.new_file(name),
-            ExportMethod::ArrowAll.new_file(name),
-        ]),
-        ExportDropDownMenuItem::OptGroup("Config", vec![ExportMethod::JsonConfig.new_file(name)]),
-    ]
+#[derive(Default)]
+pub struct ExportDropDownMenu {
+    title: String,
+    input_ref: NodeRef,
+    invalid: bool,
 }
 
 impl Component for ExportDropDownMenu {
-    type Properties = ExportDropDownMenuProps;
     type Message = ExportDropDownMenuMsg;
+    type Properties = ExportDropDownMenuProps;
 
     fn view(&self, ctx: &Context<Self>) -> yew::virtual_dom::VNode {
         let callback = ctx.link().callback(|_| ExportDropDownMenuMsg::TitleChange);
-        let plugin = ctx.props().renderer.get_active_plugin().unwrap();
-        let has_render = js_sys::Reflect::has(&plugin, js_intern!("render")).unwrap();
-        html_template! {
-            <span class="dropdown-group-label">{ "Save as" }</span>
-            <input
-                class={ if self.invalid { "invalid" } else { "" }}
-                oninput={ callback }
-                ref={ self.input_ref.clone() }
-                value={ self.title.to_owned() } />
-            <DropDownMenu<ExportFile>
-                values={ Rc::new(get_menu_items(&self.title, has_render)) }
-                callback={ ctx.props().callback.clone() }>
-            </DropDownMenu<ExportFile>>
+        let is_chart = ctx.props().renderer.is_chart();
+        html! {
+            <>
+                <span class="dropdown-group-label">{ "Save as" }</span>
+                <input
+                    class={if self.invalid { "invalid" } else { "" }}
+                    oninput={callback}
+                    ref={&self.input_ref}
+                    value={self.title.to_owned()}
+                />
+                <DropDownMenu<ExportFile>
+                    values={Rc::new(get_menu_items(&self.title, is_chart))}
+                    callback={&ctx.props().callback}
+                />
+            </>
         }
     }
 
@@ -110,23 +74,59 @@ impl Component for ExportDropDownMenu {
 
                 self.invalid = self.title.is_empty();
                 true
-            }
+            },
         }
     }
 
     fn create(ctx: &Context<Self>) -> Self {
-        ctx.set_modal_link();
-        let _sub = Some(
-            ctx.props()
-                .renderer
-                .plugin_changed
-                .add_listener(ctx.link().callback(|_| ExportDropDownMenuMsg::TitleChange)),
-        );
-
-        ExportDropDownMenu {
-            title: "untitled".to_owned(),
-            _sub,
+        Self {
+            title: ctx
+                .props()
+                .session
+                .get_title()
+                .unwrap_or_else(|| "untitled".to_owned()),
             ..Default::default()
         }
     }
+}
+
+fn get_menu_items(name: &str, is_chart: bool) -> Vec<ExportDropDownMenuItem> {
+    vec![
+        ExportDropDownMenuItem::OptGroup(
+            "Current View".into(),
+            if is_chart {
+                vec![
+                    ExportMethod::Csv.new_file(name, is_chart),
+                    ExportMethod::Json.new_file(name, is_chart),
+                    ExportMethod::Ndjson.new_file(name, is_chart),
+                    ExportMethod::Arrow.new_file(name, is_chart),
+                    ExportMethod::ArrowLz4.new_file(name, is_chart),
+                    ExportMethod::ArrowZstd.new_file(name, is_chart),
+                    ExportMethod::Html.new_file(name, is_chart),
+                    ExportMethod::Plugin.new_file(name, is_chart),
+                ]
+            } else {
+                vec![
+                    ExportMethod::Csv.new_file(name, is_chart),
+                    ExportMethod::Json.new_file(name, is_chart),
+                    ExportMethod::Ndjson.new_file(name, is_chart),
+                    ExportMethod::Arrow.new_file(name, is_chart),
+                    ExportMethod::ArrowLz4.new_file(name, is_chart),
+                    ExportMethod::ArrowZstd.new_file(name, is_chart),
+                    ExportMethod::Html.new_file(name, is_chart),
+                ]
+            },
+        ),
+        ExportDropDownMenuItem::OptGroup("All".into(), vec![
+            ExportMethod::CsvAll.new_file(name, is_chart),
+            ExportMethod::JsonAll.new_file(name, is_chart),
+            ExportMethod::NdjsonAll.new_file(name, is_chart),
+            ExportMethod::ArrowAll.new_file(name, is_chart),
+            ExportMethod::ArrowLz4All.new_file(name, is_chart),
+            ExportMethod::ArrowZstdAll.new_file(name, is_chart),
+        ]),
+        ExportDropDownMenuItem::OptGroup("Config".into(), vec![
+            ExportMethod::JsonConfig.new_file(name, is_chart),
+        ]),
+    ]
 }

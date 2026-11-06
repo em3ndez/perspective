@@ -1,17 +1,19 @@
-/******************************************************************************
- *
- * Copyright (c) 2018, the Perspective Authors.
- *
- * This file is part of the Perspective library, distributed under the terms
- * of the Apache License 2.0.  The full license can be found in the LICENSE
- * file.
- *
- */
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 /**
  * Module for the `<perspective-viewer>` custom element.  This module has no
  * (real) exports, but importing it has a side effect: the
- * `PerspectiveViewerElement`class is registered as a custom element, after
+ * `PerspectiveViewerElement` class is registered as a custom element, after
  * which it can be used as a standard DOM element.
  *
  * Though `<perspective-viewer>` is written mostly in Rust, the nature
@@ -29,22 +31,57 @@
  * @module perspective-viewer
  */
 
-export {IPerspectiveViewerPlugin} from "./plugin";
-export {HTMLPerspectiveViewerPluginElement} from "./plugin";
-export {HTMLPerspectiveViewerElement, PerspectiveViewerConfig} from "./viewer";
-export * from "./extensions";
-export * from "./migrate";
+/// <reference lib="esnext.disposable" preserve="true" />
 
-import "./number-column-style";
-import "./string-column-style";
-import "./copy_menu";
-import "./export_menu";
-import "mobile-drag-drop-shadow-dom";
+import "regular-layout";
 
-import {HTMLPerspectiveViewerPluginElement} from "./plugin";
-import {HTMLPerspectiveViewerElement} from "./viewer";
+export type { IPerspectiveViewerPlugin } from "./plugin.ts";
+export { HTMLPerspectiveViewerPluginElement } from "./plugin.ts";
+export { providers } from "./providers.ts";
+export type { AgentProviderPreset } from "./providers.ts";
 
-export default {
-    HTMLPerspectiveViewerElement,
-    HTMLPerspectiveViewerPluginElement,
-};
+export {
+    createNumberFormatter,
+    createDatetimeFormatter,
+    createDateFormatter,
+    sourceColumn,
+} from "./column-format.ts";
+export type { NumberFormatConfig, DateFormatConfig } from "./column-format.ts";
+
+export type * from "./extensions.ts";
+export { PerspectiveSelectDetail } from "./select-detail.ts";
+export type * from "../../dist/ts-rs/ViewerConfigUpdate.d.ts";
+export type * from "../../dist/ts-rs/ViewerConfig.d.ts";
+export type * from "../../dist/ts-rs/WorkspaceConfigUpdate.d.ts";
+export type * from "../../dist/ts-rs/WorkspaceConfig.d.ts";
+export type * from "../../dist/ts-rs/Filter.d.ts";
+export type * from "../../dist/ts-rs/FilterTerm.d.ts";
+export type * from "../../dist/ts-rs/FilterReducer.d.ts";
+export type * from "../../dist/ts-rs/PluginStaticConfig.d.ts";
+export type * from "../../dist/ts-rs/ExportMethod.d.ts";
+export type * from "../../dist/ts-rs/PanelOptions.d.ts";
+export type * from "../../dist/ts-rs/SaveWorkspaceOptions.d.ts";
+export type * from "../../dist/ts-rs/ClientOptions.d.ts";
+export type * from "../../dist/ts-rs/ExportOptions.d.ts";
+export type * from "../../dist/ts-rs/GetTableOptions.d.ts";
+export type * from "../../dist/ts-rs/GetClientOptions.d.ts";
+export type * from "../../dist/ts-rs/GetViewOptions.d.ts";
+export type * from "../../dist/ts-rs/GetViewMode.d.ts";
+
+export { init, init_client, migrate } from "./bootstrap.ts";
+export type {
+    InitOptions,
+    ViewerWasmRegistration,
+    ViewerWasmSource,
+    WasmBinary,
+    WasmRegistration,
+    WasmSource,
+} from "./bootstrap.ts";
+export type {
+    MigrateKind,
+    MigrateNotice,
+    MigrateResult,
+} from "@perspective-dev/client";
+import { init, init_client, migrate } from "./bootstrap.ts";
+
+export default { init, init_client, migrate };

@@ -1,0 +1,1689 @@
+#  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+#  ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+#  ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+#  ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+#  ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+#  ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+#  ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+#  ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+#  ┃ This file is part of the Perspective library, distributed under the terms ┃
+#  ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+#  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+import os
+import tempfile
+import urllib.request
+
+import pytest
+import duckdb
+
+from perspective import Client
+from perspective.virtual_servers.duckdb import DuckDBVirtualServer
+from perspective.tests.column_paths import joined_column_paths
+
+_SUPERSTORE_LOCAL = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "..",
+    "node_modules",
+    "superstore-arrow",
+    "superstore.parquet",
+)
+
+_SUPERSTORE_URL = (
+    "https://cdn.jsdelivr.net/npm/superstore-arrow@3.2.0/superstore.parquet"
+)
+
+
+def _get_superstore_parquet():
+    if os.path.exists(_SUPERSTORE_LOCAL):
+        return _SUPERSTORE_LOCAL
+    path = os.path.join(tempfile.gettempdir(), "superstore.parquet")
+    if not os.path.exists(path):
+        urllib.request.urlretrieve(_SUPERSTORE_URL, path)
+    return path
+
+
+SUPERSTORE_PARQUET = _get_superstore_parquet()
+
+
+def _load_coerce_types(db):
+    """A column of each DuckDB type whose Arrow needs coercing.
+
+    `ENUM` is the interesting one: DuckDB dictionary-encodes it and picks
+    the key width from cardinality, so it arrives as a dictionary with
+    unsigned keys rather than the `Int32` Perspective uses.
+    """
+    db.execute("CREATE TYPE mood AS ENUM ('happy', 'sad')")
+    db.execute("""
+        CREATE TABLE coerce_types (
+            "tiny" TINYINT,
+            "small" SMALLINT,
+            "utiny" UTINYINT,
+            "usmall" USMALLINT,
+            "uint" UINTEGER,
+            "ubig" UBIGINT,
+            "big" BIGINT,
+            "float" REAL,
+            "decimal" DECIMAL(18, 3),
+            "time" TIME,
+            "timestamp" TIMESTAMP,
+            "date" DATE,
+            "enum" mood,
+            "string" VARCHAR
+        )
+    """)
+
+    db.execute("""
+        INSERT INTO coerce_types VALUES
+            (-1, -300, 255, 65535, 4294967295, 9007199254740992,
+             9007199254740992, 1.5, 1.234, TIME '01:01:01',
+             TIMESTAMP '2023-01-01 00:00:00', DATE '2023-01-01',
+             'happy', 'a'),
+            (1, 300, 0, 0, 0, 0, -9007199254740992, -1.5, -5.678,
+             TIME '00:00:01', TIMESTAMP '2023-01-02 00:00:00',
+             DATE '2023-01-02', 'sad', 'b')
+    """)
+
+
+
+def approx_floats(value):
+    """`value` with every `float` in it compared approximately."""
+    if isinstance(value, float):
+        return pytest.approx(value)
+
+    if isinstance(value, (list, tuple)):
+        return type(value)(approx_floats(x) for x in value)
+
+    if isinstance(value, dict):
+        return {k: approx_floats(v) for k, v in value.items()}
+
+    return value
+
+
+@pytest.fixture(scope="module")
+def client():
+    db = duckdb.connect()
+    db.execute("SET default_null_order=NULLS_FIRST_ON_ASC_LAST_ON_DESC")
+    db.execute(
+        f"CREATE TABLE superstore AS SELECT * FROM read_parquet('{SUPERSTORE_PARQUET}')"
+    )
+
+    _load_coerce_types(db)
+    server = DuckDBVirtualServer(db)
+
+    def handle_request(msg):
+        session.handle_request(msg)
+
+    def handle_response(msg):
+        c.handle_response(msg)
+
+    session = server.new_session(handle_response)
+    c = Client(handle_request)
+    yield c
+    session.close()
+
+
+class TestDuckDBClient:
+    def test_get_hosted_table_names(self, client):
+        tables = client.get_hosted_table_names()
+        assert sorted(tables) == ["memory.coerce_types", "memory.superstore"]
+
+
+class TestDuckDBTable:
+    def test_schema(self, client):
+        table = client.open_table("memory.superstore")
+        schema = table.schema()
+        assert schema == {
+            "Product Name": "string",
+            "Ship Date": "date",
+            "City": "string",
+            "Row ID": "integer",
+            "Customer Name": "string",
+            "Quantity": "integer",
+            "Discount": "float",
+            "Sub-Category": "string",
+            "Segment": "string",
+            "Category": "string",
+            "Order Date": "date",
+            "Order ID": "string",
+            "Sales": "float",
+            "State": "string",
+            "Postal Code": "float",
+            "Country": "string",
+            "Customer ID": "string",
+            "Ship Mode": "string",
+            "Region": "string",
+            "Profit": "float",
+            "Product ID": "string",
+        }
+
+    def test_columns(self, client):
+        table = client.open_table("memory.superstore")
+        columns = table.columns()
+        assert columns == [
+            "Row ID",
+            "Order ID",
+            "Order Date",
+            "Ship Date",
+            "Ship Mode",
+            "Customer ID",
+            "Customer Name",
+            "Segment",
+            "Country",
+            "City",
+            "State",
+            "Postal Code",
+            "Region",
+            "Product ID",
+            "Category",
+            "Sub-Category",
+            "Product Name",
+            "Sales",
+            "Quantity",
+            "Discount",
+            "Profit",
+        ]
+
+    def test_size(self, client):
+        table = client.open_table("memory.superstore")
+        size = table.size()
+        assert size == 9994
+
+
+class TestDuckDBView:
+    def test_num_rows(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Sales", "Profit"])
+        num_rows = view.num_rows()
+        assert num_rows == 9994
+        view.delete()
+
+    def test_num_columns(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Sales", "Profit", "State"])
+        num_columns = view.num_columns()
+        assert num_columns == 3
+        view.delete()
+
+    def test_schema(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Sales", "Profit", "State"])
+        schema = view.schema()
+        assert schema == {
+            "Sales": "float",
+            "Profit": "float",
+            "State": "string",
+        }
+        view.delete()
+
+    def test_to_json(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Sales", "Quantity"])
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 261.96, "Quantity": 2},
+            {"Sales": 731.94, "Quantity": 3},
+            {"Sales": 14.62, "Quantity": 2},
+            {"Sales": 957.5775, "Quantity": 5},
+            {"Sales": 22.368, "Quantity": 2},
+        ]
+        view.delete()
+
+    def test_to_columns(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Sales", "Quantity"])
+        columns = view.to_columns(start_row=0, end_row=5)
+        assert columns == {
+            "Sales": [261.96, 731.94, 14.62, 957.5775, 22.368],
+            "Quantity": [2, 3, 2, 5, 2],
+        }
+        view.delete()
+
+    def test_column_paths(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Sales", "Profit", "State"])
+        paths = joined_column_paths(view)
+        assert paths == ["Sales", "Profit", "State"]
+        view.delete()
+
+
+class TestDuckDBGroupBy:
+    def test_single_group_by(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Region"],
+            aggregates={"Sales": "sum"},
+        )
+        num_rows = view.num_rows()
+        assert num_rows == 5
+        json = view.to_json()
+        assert json == approx_floats([
+            {"__ROW_PATH__": [], "Sales": 2297200.860299955},
+            {"__ROW_PATH__": ["Central"], "Sales": 501239.8908000005},
+            {"__ROW_PATH__": ["East"], "Sales": 678781.2399999979},
+            {"__ROW_PATH__": ["South"], "Sales": 391721.9050000003},
+            {"__ROW_PATH__": ["West"], "Sales": 725457.8245000006},
+        ])
+        view.delete()
+
+    def test_multi_level_group_by(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Region", "Category"],
+            aggregates={"Sales": "sum"},
+        )
+        json = view.to_json()
+        assert json == approx_floats([
+            {"__ROW_PATH__": [], "Sales": 2297200.860299955},
+            {"__ROW_PATH__": ["Central"], "Sales": 501239.8908000005},
+            {"__ROW_PATH__": ["Central", "Furniture"], "Sales": 163797.16380000004},
+            {
+                "__ROW_PATH__": ["Central", "Office Supplies"],
+                "Sales": 167026.41500000027,
+            },
+            {"__ROW_PATH__": ["Central", "Technology"], "Sales": 170416.3119999999},
+            {"__ROW_PATH__": ["East"], "Sales": 678781.2399999979},
+            {"__ROW_PATH__": ["East", "Furniture"], "Sales": 208291.20400000009},
+            {"__ROW_PATH__": ["East", "Office Supplies"], "Sales": 205516.0549999999},
+            {"__ROW_PATH__": ["East", "Technology"], "Sales": 264973.9810000003},
+            {"__ROW_PATH__": ["South"], "Sales": 391721.9050000003},
+            {"__ROW_PATH__": ["South", "Furniture"], "Sales": 117298.6840000001},
+            {"__ROW_PATH__": ["South", "Office Supplies"], "Sales": 125651.31299999992},
+            {"__ROW_PATH__": ["South", "Technology"], "Sales": 148771.9079999999},
+            {"__ROW_PATH__": ["West"], "Sales": 725457.8245000006},
+            {"__ROW_PATH__": ["West", "Furniture"], "Sales": 252612.7435000003},
+            {"__ROW_PATH__": ["West", "Office Supplies"], "Sales": 220853.24900000007},
+            {"__ROW_PATH__": ["West", "Technology"], "Sales": 251991.83199999997},
+        ])
+        view.delete()
+
+    def test_group_by_with_count_aggregate(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Region"],
+            aggregates={"Sales": "count"},
+        )
+        json = view.to_json()
+        assert json == [
+            {"__ROW_PATH__": [], "Sales": 9994},
+            {"__ROW_PATH__": ["Central"], "Sales": 2323},
+            {"__ROW_PATH__": ["East"], "Sales": 2848},
+            {"__ROW_PATH__": ["South"], "Sales": 1620},
+            {"__ROW_PATH__": ["West"], "Sales": 3203},
+        ]
+        view.delete()
+
+    def test_group_by_with_avg_aggregate(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Category"],
+            aggregates={"Sales": "avg"},
+        )
+        json = view.to_json()
+        assert json == approx_floats([
+            {"__ROW_PATH__": [], "Sales": 229.8580008304938},
+            {"__ROW_PATH__": ["Furniture"], "Sales": 349.83488698727007},
+            {"__ROW_PATH__": ["Office Supplies"], "Sales": 119.32410089611732},
+            {"__ROW_PATH__": ["Technology"], "Sales": 452.70927612344155},
+        ])
+        view.delete()
+
+    def test_group_by_with_min_aggregate(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Quantity"],
+            group_by=["Region"],
+            aggregates={"Quantity": "min"},
+        )
+        json = view.to_json()
+        assert json == [
+            {"__ROW_PATH__": [], "Quantity": 1},
+            {"__ROW_PATH__": ["Central"], "Quantity": 1},
+            {"__ROW_PATH__": ["East"], "Quantity": 1},
+            {"__ROW_PATH__": ["South"], "Quantity": 1},
+            {"__ROW_PATH__": ["West"], "Quantity": 1},
+        ]
+        view.delete()
+
+    def test_group_by_with_max_aggregate(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Quantity"],
+            group_by=["Region"],
+            aggregates={"Quantity": "max"},
+        )
+        json = view.to_json()
+        assert json == [
+            {"__ROW_PATH__": [], "Quantity": 14},
+            {"__ROW_PATH__": ["Central"], "Quantity": 14},
+            {"__ROW_PATH__": ["East"], "Quantity": 14},
+            {"__ROW_PATH__": ["South"], "Quantity": 14},
+            {"__ROW_PATH__": ["West"], "Quantity": 14},
+        ]
+        view.delete()
+
+
+class TestDuckDBSplitBy:
+    def test_single_split_by(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            split_by=["Region"],
+            group_by=["Category"],
+            aggregates={"Sales": "sum"},
+        )
+
+        column_paths = joined_column_paths(view)
+        assert column_paths == [
+            "Central|Sales",
+            "East|Sales",
+            "South|Sales",
+            "West|Sales",
+        ]
+
+        json = view.to_json()
+        assert json == approx_floats([
+            {
+                "__ROW_PATH__": [],
+                "Central|Sales": 501239.8908000005,
+                "East|Sales": 678781.2399999979,
+                "South|Sales": 391721.9050000003,
+                "West|Sales": 725457.8245000006,
+            },
+            {
+                "__ROW_PATH__": ["Furniture"],
+                "Central|Sales": 163797.16380000004,
+                "East|Sales": 208291.20400000009,
+                "South|Sales": 117298.6840000001,
+                "West|Sales": 252612.7435000003,
+            },
+            {
+                "__ROW_PATH__": ["Office Supplies"],
+                "Central|Sales": 167026.41500000027,
+                "East|Sales": 205516.0549999999,
+                "South|Sales": 125651.31299999992,
+                "West|Sales": 220853.24900000007,
+            },
+            {
+                "__ROW_PATH__": ["Technology"],
+                "Central|Sales": 170416.3119999999,
+                "East|Sales": 264973.9810000003,
+                "South|Sales": 148771.9079999999,
+                "West|Sales": 251991.83199999997,
+            },
+        ])
+        view.delete()
+
+    def test_split_by_without_group_by(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            split_by=["Category"],
+        )
+        paths = joined_column_paths(view)
+        assert any("Furniture" in c for c in paths)
+        assert any("Office Supplies" in c for c in paths)
+        assert any("Technology" in c for c in paths)
+        view.delete()
+
+
+class TestDuckDBFilter:
+    def test_filter_with_equals(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Region"],
+            filter=[["Region", "==", "West"]],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 14.62, "Region": "West"},
+            {"Sales": 48.86, "Region": "West"},
+            {"Sales": 7.28, "Region": "West"},
+            {"Sales": 907.152, "Region": "West"},
+            {"Sales": 18.504, "Region": "West"},
+        ]
+        view.delete()
+
+    def test_filter_with_not_equals(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Region"],
+            filter=[["Region", "!=", "West"]],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 261.96, "Region": "South"},
+            {"Sales": 731.94, "Region": "South"},
+            {"Sales": 957.5775, "Region": "South"},
+            {"Sales": 22.368, "Region": "South"},
+            {"Sales": 15.552, "Region": "South"},
+        ]
+        view.delete()
+
+    def test_filter_with_greater_than(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Quantity"],
+            filter=[["Quantity", ">", 5]],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 48.86, "Quantity": 7},
+            {"Sales": 907.152, "Quantity": 6},
+            {"Sales": 1706.184, "Quantity": 9},
+            {"Sales": 665.88, "Quantity": 6},
+            {"Sales": 19.46, "Quantity": 7},
+        ]
+        view.delete()
+
+    def test_filter_with_less_than(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Quantity"],
+            filter=[["Quantity", "<", 3]],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 261.96, "Quantity": 2},
+            {"Sales": 14.62, "Quantity": 2},
+            {"Sales": 22.368, "Quantity": 2},
+            {"Sales": 55.5, "Quantity": 2},
+            {"Sales": 8.56, "Quantity": 2},
+        ]
+        view.delete()
+
+    def test_filter_with_greater_than_or_equal(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Quantity"],
+            filter=[["Quantity", ">=", 10]],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 40.096, "Quantity": 14},
+            {"Sales": 43.12, "Quantity": 14},
+            {"Sales": 384.45, "Quantity": 11},
+            {"Sales": 3347.37, "Quantity": 13},
+            {"Sales": 100.24, "Quantity": 10},
+        ]
+        view.delete()
+
+    def test_filter_with_less_than_or_equal(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Quantity"],
+            filter=[["Quantity", "<=", 2]],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 261.96, "Quantity": 2},
+            {"Sales": 14.62, "Quantity": 2},
+            {"Sales": 22.368, "Quantity": 2},
+            {"Sales": 55.5, "Quantity": 2},
+            {"Sales": 8.56, "Quantity": 2},
+        ]
+        view.delete()
+
+    def test_filter_with_like(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "State"],
+            filter=[["State", "LIKE", "Cal%"]],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 14.62, "State": "California"},
+            {"Sales": 48.86, "State": "California"},
+            {"Sales": 7.28, "State": "California"},
+            {"Sales": 907.152, "State": "California"},
+            {"Sales": 18.504, "State": "California"},
+        ]
+        view.delete()
+
+    def test_multiple_filters(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Region", "Quantity"],
+            filter=[
+                ["Region", "==", "West"],
+                ["Quantity", ">", 3],
+            ],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 48.86, "Region": "West", "Quantity": 7},
+            {"Sales": 7.28, "Region": "West", "Quantity": 4},
+            {"Sales": 907.152, "Region": "West", "Quantity": 6},
+            {"Sales": 114.9, "Region": "West", "Quantity": 5},
+            {"Sales": 1706.184, "Region": "West", "Quantity": 9},
+        ]
+        view.delete()
+
+    def test_filter_with_group_by(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Category"],
+            filter=[["Region", "==", "West"]],
+            aggregates={"Sales": "sum"},
+        )
+        num_rows = view.num_rows()
+        assert num_rows == 4
+        json = view.to_json()
+        assert json == approx_floats([
+            {"__ROW_PATH__": [], "Sales": 725457.8245000006},
+            {"__ROW_PATH__": ["Furniture"], "Sales": 252612.7435000003},
+            {"__ROW_PATH__": ["Office Supplies"], "Sales": 220853.24900000007},
+            {"__ROW_PATH__": ["Technology"], "Sales": 251991.83199999997},
+        ])
+        view.delete()
+
+
+class TestDuckDBSort:
+    def test_sort_ascending(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Quantity"],
+            sort=[["Sales", "asc"]],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 0.444, "Quantity": 1},
+            {"Sales": 0.556, "Quantity": 1},
+            {"Sales": 0.836, "Quantity": 1},
+            {"Sales": 0.852, "Quantity": 1},
+            {"Sales": 0.876, "Quantity": 1},
+        ]
+        view.delete()
+
+    def test_sort_descending(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Quantity"],
+            sort=[["Sales", "desc"]],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 22638.48, "Quantity": 6},
+            {"Sales": 17499.95, "Quantity": 5},
+            {"Sales": 13999.96, "Quantity": 4},
+            {"Sales": 11199.968, "Quantity": 4},
+            {"Sales": 10499.97, "Quantity": 3},
+        ]
+        view.delete()
+
+    def test_sort_with_group_by(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Region"],
+            sort=[["Sales", "desc"]],
+            aggregates={"Sales": "sum"},
+        )
+        json = view.to_json()
+        assert json == approx_floats([
+            {"__ROW_PATH__": [], "Sales": 2297200.860299955},
+            {"__ROW_PATH__": ["West"], "Sales": 725457.8245000006},
+            {"__ROW_PATH__": ["East"], "Sales": 678781.2399999979},
+            {"__ROW_PATH__": ["Central"], "Sales": 501239.8908000005},
+            {"__ROW_PATH__": ["South"], "Sales": 391721.9050000003},
+        ])
+        view.delete()
+
+    def test_multi_column_sort(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Region", "Sales", "Quantity"],
+            sort=[
+                ["Region", "asc"],
+                ["Sales", "desc"],
+            ],
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Region": "Central", "Sales": 17499.95, "Quantity": 5},
+            {"Region": "Central", "Sales": 9892.74, "Quantity": 13},
+            {"Region": "Central", "Sales": 9449.95, "Quantity": 5},
+            {"Region": "Central", "Sales": 8159.952, "Quantity": 8},
+            {"Region": "Central", "Sales": 5443.96, "Quantity": 4},
+        ]
+        view.delete()
+
+    @pytest.mark.parametrize("split_by", [[], ["Segment"]])
+    def test_sort_with_multi_level_group_by(self, client, split_by):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Region", "Category"],
+            split_by=split_by,
+            sort=[["Sales", "desc"]],
+            aggregates={"Sales": "sum"},
+        )
+        paths = [row["__ROW_PATH__"] for row in view.to_json()]
+        assert paths == [[]] + [
+            path
+            for region, categories in MULTI_LEVEL_SORT_LEAVES.items()
+            for path in [[region]] + [[region, c] for c in categories]
+        ]
+        view.delete()
+
+    @pytest.mark.parametrize("split_by", [[], ["Segment"]])
+    def test_sort_with_multi_level_group_by_flat(self, client, split_by):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Region", "Category"],
+            split_by=split_by,
+            group_rollup_mode="flat",
+            sort=[["Sales", "desc"]],
+            aggregates={"Sales": "sum"},
+        )
+        paths = [
+            row["__ROW_PATH__"]
+            for row in view.to_json()
+            if len(row["__ROW_PATH__"]) == 2
+        ]
+        assert paths == [
+            [region, c]
+            for region, categories in MULTI_LEVEL_SORT_LEAVES.items()
+            for c in categories
+        ]
+        view.delete()
+
+
+MULTI_LEVEL_SORT_LEAVES = {
+    "West": ["Furniture", "Technology", "Office Supplies"],
+    "East": ["Technology", "Furniture", "Office Supplies"],
+    "Central": ["Technology", "Office Supplies", "Furniture"],
+    "South": ["Technology", "Office Supplies", "Furniture"],
+}
+
+
+DESCRIBE_CONFIGS = [
+    dict(columns=["Sales", "Quantity", "Region"]),
+    dict(
+        columns=["Sales", "Quantity"],
+        group_by=["Region"],
+        aggregates={"Sales": "sum", "Quantity": "avg"},
+    ),
+    dict(columns=["Sales", "Quantity"], group_by=["Region"], group_rollup_mode="flat"),
+    dict(columns=["Sales"], group_by=["Region"], sort=[["Quantity", "desc"]]),
+    dict(columns=["Sales", "Quantity"], split_by=["Region"]),
+    dict(columns=["Sales", "Quantity"], split_by=["Region"], aggregates={"Quantity": "avg"}),
+    dict(
+        columns=["Sales", "Quantity"],
+        group_by=["Category"],
+        split_by=["Region"],
+        aggregates={"Sales": "sum", "Quantity": "avg"},
+    ),
+    dict(
+        columns=["Sales"],
+        group_by=["Category"],
+        split_by=["Region"],
+        group_rollup_mode="flat",
+    ),
+    dict(
+        columns=["Sales"],
+        group_by=["Category"],
+        split_by=["Region"],
+        split_rollup_mode="rollup",
+    ),
+    dict(columns=["Sales", "Quantity"], group_rollup_mode="total", aggregates={"Quantity": "avg"}),
+    dict(
+        columns=["Sales", "Quantity"],
+        split_by=["Region"],
+        group_rollup_mode="total",
+        aggregates={"Quantity": "avg"},
+    ),
+    dict(columns=["Sales", "double"], expressions={"double": '"Sales" * 2'}),
+    dict(
+        columns=["total"],
+        group_by=["Region"],
+        expressions={"total": '"Sales" + "Profit"'},
+        aggregates={"total": "sum"},
+    ),
+]
+
+
+class TestDuckDBDescribe:
+    @pytest.mark.parametrize("config", DESCRIBE_CONFIGS)
+    def test_parity_with_view(self, client, config):
+        table = client.open_table("memory.superstore")
+        verdict = table.describe(**config)
+        view = table.view(**config)
+        assert sorted(verdict.keys()) == ["expression_schema", "view_schema"]
+        assert verdict["view_schema"] == view.schema()
+        assert sorted(verdict["expression_schema"].keys()) == sorted(
+            config.get("expressions", {}).keys()
+        )
+        view.delete()
+
+    def test_attributes_a_bad_expression(self, client):
+        table = client.open_table("memory.superstore")
+        verdict = table.describe(
+            columns=["Sales", "good", "bad"],
+            expressions={"good": '"Sales" * 2', "bad": '"nope" * 2'},
+        )
+
+        assert sorted(verdict.keys()) == ["expression_errors", "expression_schema"]
+        assert verdict["expression_schema"] == {"good": "float"}
+        assert list(verdict["expression_errors"].keys()) == ["bad"]
+        assert "nope" in verdict["expression_errors"]["bad"]["error_message"]
+        with pytest.raises(Exception):
+            table.view(
+                columns=["Sales", "good", "bad"],
+                expressions={"good": '"Sales" * 2', "bad": '"nope" * 2'},
+            )
+
+    def test_unused_invalid_expression_is_still_rejected(self, client):
+        table = client.open_table("memory.superstore")
+        verdict = table.describe(columns=["Sales"], expressions={"bad": '"nope" * 2'})
+        assert list(verdict["expression_errors"].keys()) == ["bad"]
+
+    def test_bad_column_is_a_config_error(self, client):
+        table = client.open_table("memory.superstore")
+        verdict = table.describe(columns=["Sales", "nope"])
+        assert list(verdict.keys()) == ["config_error"]
+
+    def test_validate_expressions(self, client):
+        table = client.open_table("memory.superstore")
+        expressions = {"good": '"Sales" * 2', "bad": '"nope" * 2'}
+        validated = table.validate_expressions(expressions)
+        assert validated["expression_schema"] == {"good": "float"}
+        assert list(validated["errors"].keys()) == ["bad"]
+        assert validated["expression_alias"] == expressions
+
+    def test_view_expression_schema(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["double"], expressions={"double": '"Sales" * 2'})
+        assert view.expression_schema() == {"double": "float"}
+        view.delete()
+
+
+class TestDuckDBExpressions:
+    def test_simple_expression(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "doublesales"],
+            expressions={"doublesales": '"Sales" * 2'},
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 261.96, "doublesales": 523.92},
+            {"Sales": 731.94, "doublesales": 1463.88},
+            {"Sales": 14.62, "doublesales": 29.24},
+            {"Sales": 957.5775, "doublesales": 1915.155},
+            {"Sales": 22.368, "doublesales": 44.736},
+        ]
+        view.delete()
+
+    def test_expression_with_multiple_columns(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Profit", "margin"],
+            expressions={"margin": '"Profit" / "Sales"'},
+        )
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 261.96, "Profit": 41.9136, "margin": 0.16000000000000003},
+            {"Sales": 731.94, "Profit": 219.582, "margin": 0.3},
+            {"Sales": 14.62, "Profit": 6.8714, "margin": 0.47000000000000003},
+            {"Sales": 957.5775, "Profit": -383.031, "margin": -0.4},
+            {"Sales": 22.368, "Profit": 2.5164, "margin": 0.1125},
+        ]
+        view.delete()
+
+    def test_expression_with_group_by(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["total"],
+            group_by=["Region"],
+            expressions={"total": '"Sales" + "Profit"'},
+            aggregates={"total": "sum"},
+        )
+        json = view.to_json()
+        assert json == approx_floats([
+            {"__ROW_PATH__": [], "total": 2583597.882000014},
+            {"__ROW_PATH__": ["Central"], "total": 540946.2532999996},
+            {"__ROW_PATH__": ["East"], "total": 770304.0199999991},
+            {"__ROW_PATH__": ["South"], "total": 438471.33530000027},
+            {"__ROW_PATH__": ["West"], "total": 833876.2733999988},
+        ])
+        view.delete()
+
+
+class TestDuckDBViewport:
+    def test_start_row_and_end_row(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Sales", "Profit"])
+        json = view.to_json(start_row=10, end_row=15)
+        assert json == [
+            {"Sales": 1706.184, "Profit": 85.3092},
+            {"Sales": 911.424, "Profit": 68.3568},
+            {"Sales": 15.552, "Profit": 5.4432},
+            {"Sales": 407.976, "Profit": 132.5922},
+            {"Sales": 68.81, "Profit": -123.858},
+        ]
+        view.delete()
+
+    def test_start_col_and_end_col(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales", "Profit", "Quantity", "Discount"],
+        )
+        json = view.to_json(start_row=0, end_row=5, start_col=1, end_col=3)
+        assert json == [
+            {"Profit": 41.9136, "Quantity": 2},
+            {"Profit": 219.582, "Quantity": 3},
+            {"Profit": 6.8714, "Quantity": 2},
+            {"Profit": -383.031, "Quantity": 5},
+            {"Profit": 2.5164, "Quantity": 2},
+        ]
+        view.delete()
+
+
+class TestDuckDBDataTypes:
+    def test_integer_columns(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Quantity"])
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Quantity": 2},
+            {"Quantity": 3},
+            {"Quantity": 2},
+            {"Quantity": 5},
+            {"Quantity": 2},
+        ]
+        view.delete()
+
+    def test_float_columns(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Sales", "Profit"])
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Sales": 261.96, "Profit": 41.9136},
+            {"Sales": 731.94, "Profit": 219.582},
+            {"Sales": 14.62, "Profit": 6.8714},
+            {"Sales": 957.5775, "Profit": -383.031},
+            {"Sales": 22.368, "Profit": 2.5164},
+        ]
+        view.delete()
+
+    def test_string_columns(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Region", "State", "City"])
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Region": "South", "State": "Kentucky", "City": "Henderson"},
+            {"Region": "South", "State": "Kentucky", "City": "Henderson"},
+            {"Region": "West", "State": "California", "City": "Los Angeles"},
+            {"Region": "South", "State": "Florida", "City": "Fort Lauderdale"},
+            {"Region": "South", "State": "Florida", "City": "Fort Lauderdale"},
+        ]
+        view.delete()
+
+    def test_date_columns(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Order Date"])
+        json = view.to_json(start_row=0, end_row=5)
+        assert json == [
+            {"Order Date": 1478563200000},
+            {"Order Date": 1478563200000},
+            {"Order Date": 1465689600000},
+            {"Order Date": 1444521600000},
+            {"Order Date": 1444521600000},
+        ]
+        view.delete()
+
+
+class TestDuckDBCombinedOperations:
+    def test_group_by_filter_sort(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Category"],
+            filter=[["Region", "==", "West"]],
+            sort=[["Sales", "desc"]],
+            aggregates={"Sales": "sum"},
+        )
+        json = view.to_json()
+        assert json == approx_floats([
+            {"__ROW_PATH__": [], "Sales": 725457.8245000006},
+            {"__ROW_PATH__": ["Furniture"], "Sales": 252612.7435000003},
+            {"__ROW_PATH__": ["Technology"], "Sales": 251991.83199999997},
+            {"__ROW_PATH__": ["Office Supplies"], "Sales": 220853.24900000007},
+        ])
+        view.delete()
+
+    def test_split_by_group_by_filter(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Category"],
+            split_by=["Region"],
+            filter=[["Quantity", ">", 3]],
+            aggregates={"Sales": "sum"},
+        )
+
+        paths = joined_column_paths(view)
+        assert paths == [
+            "Central|Sales",
+            "East|Sales",
+            "South|Sales",
+            "West|Sales",
+        ]
+
+        num_rows = view.num_rows()
+        assert num_rows == 4
+
+        json = view.to_json()
+        assert json == approx_floats([
+            {
+                "__ROW_PATH__": [],
+                "Central|Sales": 332883.0567999998,
+                "East|Sales": 455143.735,
+                "South|Sales": 274208.7699999999,
+                "West|Sales": 470561.28350000136,
+            },
+            {
+                "__ROW_PATH__": ["Furniture"],
+                "Central|Sales": 111457.73279999988,
+                "East|Sales": 140376.95899999997,
+                "South|Sales": 80859.618,
+                "West|Sales": 165219.5734999998,
+            },
+            {
+                "__ROW_PATH__": ["Office Supplies"],
+                "Central|Sales": 103937.78599999992,
+                "East|Sales": 135823.893,
+                "South|Sales": 84393.3579999999,
+                "West|Sales": 140206.93099999975,
+            },
+            {
+                "__ROW_PATH__": ["Technology"],
+                "Central|Sales": 117487.53800000002,
+                "East|Sales": 178942.883,
+                "South|Sales": 108955.79400000005,
+                "West|Sales": 165134.77900000007,
+            },
+        ])
+        view.delete()
+
+    def test_split_by_only(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            split_by=["Region"],
+            filter=[["Quantity", ">", 3]],
+        )
+
+        paths = joined_column_paths(view)
+        assert paths == [
+            "Central|Sales",
+            "East|Sales",
+            "South|Sales",
+            "West|Sales",
+        ]
+
+        num_rows = view.num_rows()
+        assert num_rows == 4284
+
+        json = view.to_json(start_row=0, end_row=1)
+        assert json == [
+            {
+                "Central|Sales": None,
+                "East|Sales": None,
+                "South|Sales": 957.5775,
+                "West|Sales": None,
+            },
+        ]
+        view.delete()
+
+    def test_expressions_group_by_sort(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["profitmargin"],
+            group_by=["Region"],
+            expressions={"profitmargin": '"Profit" / "Sales" * 100'},
+            sort=[["profitmargin", "desc"]],
+            aggregates={"profitmargin": "avg"},
+        )
+        json = view.to_json()
+        assert json == approx_floats([
+            {"__ROW_PATH__": [], "profitmargin": 12.031392972104467},
+            {"__ROW_PATH__": ["West"], "profitmargin": 21.948661793784012},
+            {"__ROW_PATH__": ["East"], "profitmargin": 16.722695960406636},
+            {"__ROW_PATH__": ["South"], "profitmargin": 16.35190329218107},
+            {"__ROW_PATH__": ["Central"], "profitmargin": -10.407293926323575},
+        ])
+        view.delete()
+
+
+class TestDuckDBMinMax:
+    def test_min_max_integer(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Quantity"])
+        min_val, max_val = view.get_min_max("Quantity")
+        assert min_val == 1
+        assert max_val == 14
+        view.delete()
+
+    def test_min_max_float(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Sales"])
+        min_val, max_val = view.get_min_max("Sales")
+        assert min_val == 0.444
+        assert max_val == 22638.48
+        view.delete()
+
+    def test_min_max_string(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Category"])
+        min_val, max_val = view.get_min_max("Category")
+        assert min_val == "Furniture"
+        assert max_val == "Technology"
+        view.delete()
+
+    def test_min_max_with_group_by(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Region"],
+            aggregates={"Sales": "sum"},
+        )
+        min_val, max_val = view.get_min_max("Sales")
+        assert min_val > 0
+        assert max_val > 0
+        assert max_val >= min_val
+        view.delete()
+
+    def test_min_max_with_filter(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Quantity"],
+            filter=[["Quantity", ">", 10]],
+        )
+        min_val, max_val = view.get_min_max("Quantity")
+        assert min_val >= 11
+        assert max_val == 14
+        view.delete()
+
+
+class TestDuckDBCoerceTypes:
+    """The DuckDB types whose Arrow is not already one of Perspective's."""
+
+    def test_schema(self, client):
+        table = client.open_table("memory.coerce_types")
+        assert table.schema() == {
+            "tiny": "integer",
+            "small": "integer",
+            "utiny": "integer",
+            "usmall": "integer",
+            "uint": "float",
+            "ubig": "float",
+            "big": "float",
+            "float": "float",
+            "decimal": "float",
+            "time": "datetime",
+            "timestamp": "datetime",
+            "date": "date",
+            "enum": "string",
+            "string": "string",
+        }
+
+    def test_narrow_integers_flat(self, client):
+        table = client.open_table("memory.coerce_types")
+        view = table.view(columns=["tiny", "small", "utiny", "usmall"])
+        assert view.to_json() == [
+            {"tiny": -1, "small": -300, "utiny": 255, "usmall": 65535},
+            {"tiny": 1, "small": 300, "utiny": 0, "usmall": 0},
+        ]
+        view.delete()
+
+    def test_wide_and_fractional_numbers_flat(self, client):
+        table = client.open_table("memory.coerce_types")
+        view = table.view(columns=["uint", "ubig", "big", "float", "decimal"])
+        assert view.to_json() == [
+            {
+                "uint": 4294967295.0,
+                "ubig": 9007199254740992.0,
+                "big": 9007199254740992.0,
+                "float": 1.5,
+                "decimal": pytest.approx(1.234),
+            },
+            {
+                "uint": 0.0,
+                "ubig": 0.0,
+                "big": -9007199254740992.0,
+                "float": -1.5,
+                "decimal": pytest.approx(-5.678),
+            },
+        ]
+        view.delete()
+
+    def test_temporal_flat(self, client):
+        table = client.open_table("memory.coerce_types")
+        view = table.view(columns=["time", "timestamp", "date"])
+        assert view.to_json() == [
+            {
+                "time": 3661000,
+                "timestamp": 1672531200000,
+                "date": 1672531200000,
+            },
+            {
+                "time": 1000,
+                "timestamp": 1672617600000,
+                "date": 1672617600000,
+            },
+        ]
+        view.delete()
+
+    def test_enum_flat(self, client):
+        # Dictionary-encoded by DuckDB, with a key width chosen from the
+        # `ENUM`'s cardinality rather than the `Int32` Perspective uses.
+        table = client.open_table("memory.coerce_types")
+        view = table.view(columns=["enum", "string"])
+        assert view.to_json() == [
+            {"enum": "happy", "string": "a"},
+            {"enum": "sad", "string": "b"},
+        ]
+        view.delete()
+
+    def test_enum_group_by(self, client):
+        # The #3149 repro: the row path is read out of that dictionary.
+        table = client.open_table("memory.coerce_types")
+        view = table.view(
+            group_by=["enum"],
+            columns=["tiny"],
+            aggregates={"tiny": "sum"},
+        )
+        assert view.to_json() == [
+            {"__ROW_PATH__": [], "tiny": 0},
+            {"__ROW_PATH__": ["happy"], "tiny": -1},
+            {"__ROW_PATH__": ["sad"], "tiny": 1},
+        ]
+        view.delete()
+
+    def test_decimal_group_by(self, client):
+        table = client.open_table("memory.coerce_types")
+        view = table.view(
+            group_by=["decimal"],
+            columns=["tiny"],
+            aggregates={"tiny": "sum"},
+        )
+        assert view.to_json() == [
+            {"__ROW_PATH__": [], "tiny": 0},
+            {"__ROW_PATH__": [pytest.approx(-5.678)], "tiny": 1},
+            {"__ROW_PATH__": [pytest.approx(1.234)], "tiny": -1},
+        ]
+        view.delete()
+
+    def test_column_values_view(self, client):
+        # The filter dropdown's query shape - group by the column, select
+        # no columns at all.
+        table = client.open_table("memory.coerce_types")
+        view = table.view(group_by=["enum"], columns=[])
+        csv = view.to_csv()
+        assert [line for line in csv.splitlines() if line] == [
+            "enum",
+            "null",
+            '"happy"',
+            '"sad"',
+        ]
+        view.delete()
+
+    def test_filter_matching_nothing(self, client):
+        # DuckDB returns a chunkless table for an empty result, which
+        # `write_table` serializes as a schema with no record batches at
+        # all. That is a view with no rows, not a broken stream.
+        table = client.open_table("memory.coerce_types")
+        view = table.view(
+            columns=["tiny"],
+            filter=[["string", "==", "no such value"]],
+        )
+        assert view.to_json() == []
+        assert view.to_columns() == {"tiny": []}
+        view.delete()
+
+
+class TestDuckDBTableFromView:
+    def test_group_by_view_unrolls_row_path(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"], group_by=["Region"], aggregates={"Sales": "sum"}
+        )
+
+        derived = client.table(view, name="py_derived_group")
+        assert derived.schema() == {
+            "Region": "string",
+            "Sales": "float",
+        }
+
+        child = derived.view(columns=["Region", "Sales"])
+        expected = sorted(
+            (str(row["__ROW_PATH__"][0]) if row["__ROW_PATH__"] else "None", row["Sales"])
+            for row in view.to_json()
+        )
+
+        actual = sorted(
+            (str(row["Region"]), row["Sales"]) for row in child.to_json()
+        )
+
+        assert actual == expected
+        child.delete()
+        derived.delete()
+        view.delete()
+
+    def test_group_by_view_qualifies_key_aggregate(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Region", "Sales"],
+            group_by=["Region"],
+            aggregates={"Region": "count", "Sales": "sum"},
+        )
+
+        derived = client.table(view, name="py_derived_qualified")
+        assert derived.columns() == ["Region", "Region (count)", "Sales"]
+        child = derived.view(columns=["Region", "Region (count)"])
+        assert child.num_rows() == view.num_rows()
+        child.delete()
+        derived.delete()
+        view.delete()
+
+    def test_name_that_is_not_an_identifier(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"], group_by=["Region"], aggregates={"Sales": "sum"}
+        )
+
+        derived = client.table(view, name="memory.superstore GROUP BY Region")
+        assert derived.schema() == {"Region": "string", "Sales": "float"}
+        assert derived.size() == view.num_rows()
+        child = derived.view(columns=["Region", "Sales"])
+        assert child.num_rows() == view.num_rows()
+        child.delete()
+        derived.delete()
+        view.delete()
+
+    def test_explicit_schema(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Category"],
+            split_by=["Region"],
+            aggregates={"Sales": "sum"},
+            group_rollup_mode="flat",
+        )
+
+        derived = client.table(
+            view,
+            name="py_derived_schema",
+            schema={
+                "Category": "string",
+                "West|Sales": "float",
+                "North|Sales": "float",
+            },
+        )
+
+        assert derived.columns() == [
+            "Category",
+            "West|Sales",
+            "North|Sales",
+        ]
+
+        child = derived.view(
+            columns=["Category", "West|Sales", "North|Sales"]
+        )
+
+        rows = child.to_json()
+        assert len(rows) == 3
+        assert all(row["North|Sales"] is None for row in rows)
+        child.delete()
+        derived.delete()
+        view.delete()
+
+    def test_rejects_mismatched_type(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"], group_by=["Region"], aggregates={"Sales": "sum"}
+        )
+
+        with pytest.raises(Exception):
+            client.table(view, schema={"Sales": "string"})
+
+        view.delete()
+
+    def test_rejects_index_and_limit(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"], group_by=["Region"], aggregates={"Sales": "sum"}
+        )
+
+        with pytest.raises(Exception):
+            client.table(view, index="Sales")
+
+        with pytest.raises(Exception):
+            client.table(view, limit=10)
+
+        view.delete()
+
+    def test_flat_view(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(columns=["Region", "Sales"], filter=[["Sales", ">", 5000]])
+
+        derived = client.table(view, name="py_derived_flat")
+        assert derived.schema() == {"Region": "string", "Sales": "float"}
+        child = derived.view(columns=["Region", "Sales"])
+        assert child.to_json() == view.to_json()
+        child.delete()
+        derived.delete()
+        view.delete()
+
+    def test_flat_rollup_split_by_view(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Category"],
+            split_by=["Region"],
+            aggregates={"Sales": "sum"},
+            group_rollup_mode="flat",
+        )
+
+        derived = client.table(view, name="py_derived_split")
+        assert derived.columns() == [
+            "Category",
+            "Central|Sales",
+            "East|Sales",
+            "South|Sales",
+            "West|Sales",
+        ]
+
+        child = derived.view(
+            columns=["Category", "West|Sales"],
+            filter=[["West|Sales", ">", 250000]],
+        )
+
+        expected = sorted(
+            row["__ROW_PATH__"][0]
+            for row in view.to_json()
+            if row["West|Sales"] > 250000
+        )
+
+        assert sorted(row["Category"] for row in child.to_json()) == expected
+        child.delete()
+        derived.delete()
+        view.delete()
+
+    def test_expression_column(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Region", "Sales", "doublesales"],
+            expressions={"doublesales": '"Sales" * 2'},
+            filter=[["Sales", ">", 5000]],
+        )
+
+        derived = client.table(view, name="py_derived_expression")
+        assert derived.schema() == {
+            "Region": "string",
+            "Sales": "float",
+            "doublesales": "float",
+        }
+
+        child = derived.view(columns=["Region", "Sales", "doublesales"])
+        assert child.to_json() == view.to_json()
+        child.delete()
+        derived.delete()
+        view.delete()
+
+    def test_derived_of_derived(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Region", "State"],
+            aggregates={"Sales": "sum"},
+            group_rollup_mode="flat",
+        )
+
+        derived = client.table(view, name="memory.superstore GROUP BY Region, State")
+
+        sub_view = derived.view(
+            columns=["Sales"],
+            group_by=["Region"],
+            aggregates={"Sales": "sum"},
+            group_rollup_mode="flat",
+        )
+
+        sub_derived = client.table(
+            sub_view, name="memory.superstore GROUP BY Region, State GROUP BY Region"
+        )
+
+        assert sub_derived.schema() == {"Region": "string", "Sales": "float"}
+        child = sub_derived.view(columns=["Region", "Sales"])
+        expected_view = table.view(
+            columns=["Sales"],
+            group_by=["Region"],
+            aggregates={"Sales": "sum"},
+            group_rollup_mode="flat",
+        )
+
+        expected = sorted(
+            (row["__ROW_PATH__"][0], row["Sales"]) for row in expected_view.to_json()
+        )
+
+        actual = sorted((row["Region"], row["Sales"]) for row in child.to_json())
+        assert actual == approx_floats(expected)
+        expected_view.delete()
+        child.delete()
+        sub_derived.delete()
+        sub_view.delete()
+        derived.delete()
+        view.delete()
+
+    def test_view_of_derived_table(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"],
+            group_by=["Region", "State"],
+            aggregates={"Sales": "sum"},
+            group_rollup_mode="flat",
+        )
+
+        derived = client.table(view, name="memory.superstore GROUP BY Region, State 1")
+        child = derived.view(
+            columns=["State", "Sales", "double"],
+            expressions={"double": '"Sales" * 2'},
+            filter=[["Region", "==", "West"]],
+            sort=[["Sales", "desc"]],
+        )
+
+        expected = sorted(
+            (
+                (row["__ROW_PATH__"][1], row["Sales"])
+                for row in view.to_json()
+                if row["__ROW_PATH__"][0] == "West"
+            ),
+            key=lambda x: -x[1],
+        )
+
+        rows = child.to_json()
+        assert [row["State"] for row in rows] == [x[0] for x in expected]
+        assert [row["double"] for row in rows] == approx_floats(
+            [2 * x[1] for x in expected]
+        )
+
+        child.delete()
+        derived.delete()
+        view.delete()
+
+    def test_delete_frees_name(self, client):
+        table = client.open_table("memory.superstore")
+        view = table.view(
+            columns=["Sales"], group_by=["Region"], aggregates={"Sales": "sum"}
+        )
+
+        name = "memory.superstore GROUP BY Region 2"
+        client.table(view, name=name).delete()
+        derived = client.table(view, name=name)
+        assert derived.size() == view.num_rows()
+        derived.delete()
+        view.delete()
+
+
+EXPAND_CONFIG = {
+    "columns": ["Sales"],
+    "group_by": ["Region", "State"],
+    "aggregates": {"Sales": "sum"},
+}
+
+
+def row_paths(view):
+    return view.to_columns()["__ROW_PATH__"]
+
+
+class TestDuckDBExpandCollapse:
+    def test_collapse_hides_descendants(self, client):
+        view = client.open_table("memory.superstore").view(**EXPAND_CONFIG)
+        before = row_paths(view)
+        central = len([x for x in before if x[:1] == ["Central"]]) - 1
+        assert view.collapse(1) == central
+        assert view.num_rows() == len(before) - central
+        assert row_paths(view)[:3] == [[], ["Central"], ["East"]]
+        assert view.collapse(1) == 0
+        view.delete()
+
+    def test_expand_restores_children(self, client):
+        view = client.open_table("memory.superstore").view(**EXPAND_CONFIG)
+        before = row_paths(view)
+        central = view.collapse(1)
+        assert view.expand(1) == central
+        assert row_paths(view) == before
+        assert view.expand(1) == 0
+        view.delete()
+
+    def test_expand_shows_children_collapsed(self, client):
+        view = client.open_table("memory.superstore").view(**EXPAND_CONFIG)
+        num_rows = view.num_rows()
+        assert view.collapse(0) == num_rows - 1
+        assert row_paths(view) == [[]]
+        assert view.expand(0) == 4
+        assert row_paths(view) == [[], ["Central"], ["East"], ["South"], ["West"]]
+        view.delete()
+
+    def test_collapse_leaf_is_noop(self, client):
+        view = client.open_table("memory.superstore").view(**EXPAND_CONFIG)
+        num_rows = view.num_rows()
+        assert view.collapse(2) == 0
+        assert view.num_rows() == num_rows
+        view.delete()
+
+    def test_flat_is_not_expandable(self, client):
+        view = client.open_table("memory.superstore").view(
+            group_rollup_mode="flat", **EXPAND_CONFIG
+        )
+
+        num_rows = view.num_rows()
+        assert view.collapse(0) == 0
+        assert view.num_rows() == num_rows
+        view.delete()
+
+    def test_expansion_column_does_not_leak(self, client):
+        view = client.open_table("memory.superstore").view(**EXPAND_CONFIG)
+        view.collapse(1)
+        assert view.schema() == {"Sales": "float"}
+        assert view.num_columns() == 1
+        assert sorted(view.to_columns().keys()) == ["Sales", "__ROW_PATH__"]
+        derived = client.table(view, name="py_derived_expand")
+        assert derived.schema() == {
+            "Region": "string",
+            "State": "string",
+            "Sales": "float",
+        }
+
+        derived.delete()
+        view.delete()
+
+    def test_ungrouped_view_does_not_leak(self, client):
+        view = client.open_table("memory.superstore").view(columns=["Region", "Sales"])
+        assert view.schema() == {"Region": "string", "Sales": "float"}
+        assert view.num_columns() == 2
+        assert sorted(view.to_columns().keys()) == ["Region", "Sales"]
+        view.delete()
+
+
+class TestDuckDBHostedTableNames:
+
+    @pytest.fixture
+    def multi(self):
+        db = duckdb.connect()
+        db.execute("CREATE TABLE trades AS SELECT 1 AS a")
+        db.execute("CREATE SCHEMA s; CREATE TABLE s.t AS SELECT 2 AS a")
+        db.execute('CREATE SCHEMA "my schema"')
+        db.execute('CREATE TABLE "my schema"."MyT" AS SELECT 3 AS a')
+        db.execute("ATTACH ':memory:' AS other")
+        db.execute("CREATE TABLE other.main.w AS SELECT 4 AS a")
+        server = DuckDBVirtualServer(db)
+
+        def handle_request(msg):
+            session.handle_request(msg)
+
+        def handle_response(msg):
+            c.handle_response(msg)
+
+        session = server.new_session(handle_response)
+        c = Client(handle_request)
+        yield c
+        session.close()
+
+    def test_lists_every_catalog_and_schema(self, multi):
+        assert sorted(multi.get_hosted_table_names()) == [
+            'memory."my schema".MyT',
+            "memory.s.t",
+            "memory.trades",
+            "other.w",
+        ]
+
+    def test_opens_every_table(self, multi):
+        expected = {
+            'memory."my schema".MyT': 3,
+            "memory.s.t": 2,
+            "memory.trades": 1,
+            "other.w": 4,
+        }
+
+        for name, value in expected.items():
+            view = multi.open_table(name).view(columns=["a"])
+            assert view.to_columns() == {"a": [value]}
+            view.delete()
+
+    def test_views_are_not_hosted(self, multi):
+        before = sorted(multi.get_hosted_table_names())
+        view = multi.open_table("memory.trades").view(
+            group_by=["a"], columns=["a"], aggregates={"a": "sum"}
+        )
+
+        assert sorted(multi.get_hosted_table_names()) == before
+        view.delete()
+
+    def test_derived_tables_are_hosted_once(self, multi):
+        view = multi.open_table("memory.s.t").view(
+            group_by=["a"],
+            columns=["a"],
+            aggregates={"a": "sum"},
+            group_rollup_mode="flat",
+        )
+
+        derived = multi.table(view, name="s.t GROUP BY a")
+        names = multi.get_hosted_table_names()
+        assert names.count("s.t GROUP BY a") == 1
+        assert multi.open_table("s.t GROUP BY a").view(columns=["a"]).to_columns() == {
+            "a": [2]
+        }
+
+        derived.delete()
+        view.delete()

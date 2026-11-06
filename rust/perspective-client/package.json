@@ -1,0 +1,16 @@
+{
+    "name": "@perspective-dev/client-rust",
+    "version": "5.8.0",
+    "description": "",
+    "private": true,
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/perspective-dev/perspective.git",
+        "directory": "rust/perspective-client"
+    },
+    "type": "module",
+    "license": "Apache-2.0",
+    "scripts": {
+        "clean": "rm src/rust/proto.rs"
+    }
+}

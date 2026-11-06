@@ -1,0 +1,111 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+import { HTMLPerspectiveViewerElement } from "@perspective-dev/viewer";
+import type {
+    DatagridModel,
+    DatagridPluginElement,
+    EditMode,
+} from "../types.ts";
+
+export const EDIT_MODES: readonly EditMode[] = [
+    "READ_ONLY",
+    "EDIT",
+    "SELECT_ROW",
+    "SELECT_COLUMN",
+    "SELECT_REGION",
+    "SELECT_ROW_TREE",
+] as const;
+
+function isSelectRowTreeAvailable(model?: DatagridModel): boolean {
+    if (!model) {
+        return false;
+    }
+
+    return (
+        model._config.group_by.length > 0 &&
+        model._config.group_rollup_mode !== "flat"
+    );
+}
+
+/** Whether `mode` can be entered, given the current model. */
+function isEditModeAvailable(mode: EditMode, model?: DatagridModel): boolean {
+    if (mode === "SELECT_ROW_TREE") {
+        return isSelectRowTreeAvailable(model);
+    }
+
+    if (mode === "EDIT") {
+        return model?._update ?? true;
+    }
+
+    return true;
+}
+
+export function toggle_edit_mode(
+    this: DatagridPluginElement,
+    mode?: EditMode,
+    echo: boolean = true,
+): void {
+    if (typeof mode === "undefined") {
+        let idx = EDIT_MODES.indexOf(this._edit_mode);
+        do {
+            idx = (idx + 1) % EDIT_MODES.length;
+        } while (!isEditModeAvailable(EDIT_MODES[idx], this.model));
+
+        mode = EDIT_MODES[idx];
+    } else if (mode === "EDIT" && this.model?._update === false) {
+        mode = "READ_ONLY";
+    }
+
+    const panel = this.getAttribute("slot") ?? undefined;
+    (this.parentElement as HTMLPerspectiveViewerElement)?.setSelection?.(
+        undefined,
+        { panel },
+    );
+    this._edit_mode = mode;
+    if (this.model) {
+        this.model._edit_mode = mode;
+        this.model._tree_selection_id = undefined;
+        this.model._selection_state = {
+            selected_areas: [],
+            dirty: true,
+        };
+    }
+
+    if (echo) {
+        (this.parentElement as HTMLPerspectiveViewerElement)?.restore?.(
+            {
+                plugin_config: { edit_mode: mode },
+            },
+            { panel },
+        );
+    }
+
+    if (this._edit_button !== undefined) {
+        this._edit_button.dataset.editMode = mode;
+    }
+}
+
+export function toggle_scroll_lock(
+    this: DatagridPluginElement,
+    force?: boolean,
+): void {
+    if (typeof force === "undefined") {
+        force = !this._is_scroll_lock;
+    }
+
+    this._is_scroll_lock = force;
+    this.classList.toggle("sub-cell-scroll-disabled", force);
+    if (this._scroll_lock !== undefined) {
+        this._scroll_lock.classList.toggle("lock-scroll", force);
+    }
+}

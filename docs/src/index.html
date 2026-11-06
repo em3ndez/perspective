@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no" />
+        <!--seo:head-->
+        <link rel="icon" type="image/svg+xml" href="/svg/perspective_logo.svg" />
+        <link rel="stylesheet" href="/style.css" />
+        <noscript>
+            <style>
+                #app {
+                    display: none;
+                }
+
+                #about {
+                    display: block;
+                    position: static;
+                    margin: 0 auto;
+                    border: none;
+                    max-width: 860px;
+                    max-height: none;
+                }
+
+                #about .about__close {
+                    display: none;
+                }
+            </style>
+        </noscript>
+    </head>
+    <body>
+        <div class="app-shell" id="app" data-sidebar="expanded">
+            <perspective-viewer id="viewer"></perspective-viewer>
+        </div>
+        <dialog id="about" class="about">
+            <!--seo:about-->
+        </dialog>
+        <script type="module" src="/index.js"></script>
+    </body>
+</html>

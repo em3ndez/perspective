@@ -1,0 +1,85 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+use futures::FutureExt;
+use perspective_client::clone;
+use perspective_js::utils::*;
+
+use crate::config::ColumnConfigFieldUpdate;
+use crate::renderer::{Renderer, StagedEdit};
+use crate::session::{EditDelta, OpKind, Session};
+
+/// Apply a [`ColumnConfigFieldUpdate`] from a column-style sidebar
+/// control to the active plugin's per-column config bucket on
+/// [`Renderer`], then re-`restore` the active plugin with the
+/// updated maps and trigger a render.
+///
+/// Plugin-level (non-column) field updates go through
+/// [`super::send_plugin_config`] instead.
+pub fn send_column_config(
+    session: &Session,
+    renderer: &Renderer,
+    column_name: &str,
+    update: ColumnConfigFieldUpdate,
+) {
+    let column = column_name.to_string();
+    let staged = renderer.stage(StagedEdit::ColumnField {
+        column: column.clone(),
+        update: update.clone(),
+    });
+
+    let kind = OpKind::Edit {
+        delta: EditDelta::Renderer,
+        swaps_plugin: false,
+    };
+
+    let ticket = session.submit(kind, {
+        clone!(session, renderer);
+        move |_ctx| {
+            Box::pin(async move {
+                let view_config = session.committed_view_config().clone();
+                renderer.update_columns_config_field(&view_config, &session, column, update);
+                drop(staged);
+                Ok(Some(
+                    async move {
+                        let view_config_snapshot = session.committed_view_config().clone();
+                        let columns_configs = renderer
+                            .all_columns_configs_materialized(&view_config_snapshot, &session)
+                            .await;
+
+                        let plugin_token = wasm_bindgen::JsValue::from_serde_ext(
+                            &renderer.plugin_config_materialized(&view_config_snapshot),
+                        )
+                        .unwrap();
+
+                        renderer
+                            .ensure_plugin_selected()?
+                            .restore(&plugin_token, Some(&columns_configs))?;
+
+                        clone!(session);
+                        renderer
+                            .update_lazy(async move { Ok(session.get_view_with_dimensions()) })
+                            .await?;
+
+                        let stored = renderer.committed_columns_configs();
+                        renderer.columns_config_changed.emit(stored.clone());
+                        renderer.column_style_changed.emit(stored);
+                        Ok(())
+                    }
+                    .boxed_local(),
+                ))
+            })
+        }
+    });
+
+    ApiFuture::spawn(ticket.settle());
+}

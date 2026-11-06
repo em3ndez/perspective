@@ -1,37 +1,40 @@
-/******************************************************************************
- *
- * Copyright (c) 2018, the Perspective Authors.
- *
- * This file is part of the Perspective library, distributed under the terms of
- * the Apache License 2.0.  The full license can be found in the LICENSE file.
- *
- */
-
-import perspective from "@finos/perspective";
-
-import "@finos/perspective-viewer";
-import "@finos/perspective-viewer-datagrid";
-import "@finos/perspective-viewer-d3fc/bar";
-
-import "@finos/perspective-viewer/dist/css/material-dark.css";
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 import "./index.css";
+import superstore from "superstore-arrow/superstore.lz4.arrow";
 
-const worker = perspective.shared_worker();
+import "@perspective-dev/viewer/dist/css/themes.css";
 
-// superstore.arrow located in node_modules/superstore-arrow/ and it's
-// configured by 'devServer' in 'webpack.config.js'
-// const req = fetch("./superstore.arrow");
+import "@perspective-dev/viewer-datagrid";
+import "@perspective-dev/viewer-charts";
+import perspective from "@perspective-dev/client";
+import perspective_viewer from "@perspective-dev/viewer";
 
-window.addEventListener("DOMContentLoaded", async () => {
-    const viewer = document.createElement("perspective-viewer");
-    document.body.append(viewer);
+// Depending on the phase of the moon (and to a lesser extend, your `webpack`
+// version), this may or may not have a default export.
+import SERVER_WASM from "@perspective-dev/server/dist/wasm/perspective-server.wasm";
+import CLIENT_WASM from "@perspective-dev/viewer/dist/wasm/perspective-viewer.wasm";
 
-    // const resp = await req;
-    // const buffer = await resp.arrayBuffer();
-    const table = worker.table({x: [1, 2, 3, 4, 5]});
-
-    viewer.load(table);
-
-    window.viewer = viewer;
+console.log(CLIENT_WASM);
+await perspective_viewer.init({
+    server: SERVER_WASM,
+    viewer: CLIENT_WASM,
 });
+
+const worker = await perspective.worker();
+const viewer = document.createElement("perspective-viewer");
+document.body.append(viewer);
+
+const table = worker.table(superstore);
+viewer.load(table);
+window.viewer = viewer;

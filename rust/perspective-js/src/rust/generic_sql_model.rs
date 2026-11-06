@@ -1,0 +1,358 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+//! WASM bindings for the DuckDB SQL query builder.
+
+use std::str::FromStr;
+
+use indexmap::IndexMap;
+use js_sys::Object;
+use perspective_client::config::ViewConfig;
+use perspective_client::proto::{ColumnType, ViewPort};
+use perspective_client::virtual_server;
+use wasm_bindgen::prelude::*;
+
+use crate::utils::*;
+
+/// JavaScript-facing DuckDB SQL query builder.
+///
+/// This struct wraps the Rust `DuckDBSqlBuilder` and exposes it to JavaScript
+/// via wasm_bindgen.
+#[wasm_bindgen]
+pub struct GenericSQLVirtualServerModel {
+    inner: virtual_server::GenericSQLVirtualServerModel,
+}
+
+#[wasm_bindgen]
+extern "C" {
+    pub type JsGenericSQLVirtualServerModelArgs;
+}
+
+#[wasm_bindgen]
+impl GenericSQLVirtualServerModel {
+    /// Creates a new `JsDuckDBSqlBuilder` instance.
+    #[wasm_bindgen(constructor)]
+    pub fn new(args: Option<JsGenericSQLVirtualServerModelArgs>) -> Result<Self, JsValue> {
+        Ok(Self {
+            inner: virtual_server::GenericSQLVirtualServerModel::new(
+                args.map(|x| x.into_serde_ext())
+                    .transpose()?
+                    .unwrap_or_default(),
+            ),
+        })
+    }
+
+    /// Returns the entity id of the hosted table at relation path `parts`,
+    /// each part quoted only when it is not a bare identifier.
+    #[wasm_bindgen(js_name = "tablePath")]
+    pub fn table_path(&self, parts: Vec<String>) -> Result<String, JsValue> {
+        let parts = parts.iter().map(String::as_str).collect::<Vec<_>>();
+        self.inner
+            .table_path(&parts)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL relation reference for an entity id.
+    #[wasm_bindgen(js_name = "quoteEntity")]
+    pub fn quote_entity(&self, entity_id: &str) -> Result<String, JsValue> {
+        self.inner
+            .quote_entity(entity_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to list all hosted tables.
+    #[wasm_bindgen(js_name = "getHostedTables")]
+    pub fn get_hosted_tables(&self) -> Result<String, JsValue> {
+        self.inner
+            .get_hosted_tables()
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to describe a table's schema.
+    #[wasm_bindgen(js_name = "tableSchema")]
+    pub fn table_schema(&self, table_id: &str) -> Result<String, JsValue> {
+        self.inner
+            .table_schema(table_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to get the row count of a table.
+    #[wasm_bindgen(js_name = "tableSize")]
+    pub fn table_size(&self, table_id: &str) -> Result<String, JsValue> {
+        self.inner
+            .table_size(table_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to get the column count of a view.
+    #[wasm_bindgen(js_name = "viewColumnSize")]
+    pub fn view_column_size(&self, view_id: &str) -> Result<String, JsValue> {
+        self.inner
+            .view_column_size(view_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query that plans every expression of `config` at once
+    /// against a table, one result column per expression alias, or `undefined`
+    /// when the config has no expressions.
+    #[wasm_bindgen(js_name = "expressionsDescribe")]
+    pub fn expressions_describe(
+        &self,
+        table_id: &str,
+        config: JsValue,
+    ) -> Result<Option<String>, JsValue> {
+        let config: ViewConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        self.inner
+            .expressions_describe(table_id, &config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query that plans ONE expression against a table - for
+    /// attributing a failed `expressionsDescribe` to the expressions at fault.
+    #[wasm_bindgen(js_name = "expressionDescribe")]
+    pub fn expression_describe(&self, table_id: &str, expression: &str) -> Result<String, JsValue> {
+        self.inner
+            .expression_describe(table_id, expression)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query that plans the view `config` would build and
+    /// reports its result columns without materializing it (`split_by` folded
+    /// into `group_by`, no `PIVOT`), or `undefined` when the config selects no
+    /// columns.
+    #[wasm_bindgen(js_name = "tableDescribe")]
+    pub fn table_describe(
+        &self,
+        table_id: &str,
+        config: JsValue,
+        schema: JsValue,
+        unordered: Option<bool>,
+    ) -> Result<Option<String>, JsValue> {
+        let config: ViewConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let schema = if schema.is_undefined() || schema.is_null() {
+            IndexMap::new()
+        } else {
+            self.parse_schema(schema)?
+        };
+
+        let result = if unordered.unwrap_or(false) {
+            self.inner
+                .table_describe_unordered(table_id, &config, &schema)
+        } else {
+            self.inner.table_describe(table_id, &config, &schema)
+        };
+
+        result.map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to delete a view.
+    #[wasm_bindgen(js_name = "viewDelete")]
+    pub fn view_delete(&self, view_id: &str) -> Result<String, JsValue> {
+        self.inner
+            .view_delete(view_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to create a view from a table with the given
+    /// configuration.
+    #[wasm_bindgen(js_name = "tableMakeView")]
+    pub fn table_make_view(
+        &self,
+        table_id: &str,
+        view_id: &str,
+        config: JsValue,
+        schema: JsValue,
+        unordered: Option<bool>,
+    ) -> Result<String, JsValue> {
+        let config: ViewConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let schema = if schema.is_undefined() || schema.is_null() {
+            IndexMap::new()
+        } else {
+            self.parse_schema(schema)?
+        };
+
+        let result = if unordered.unwrap_or(false) {
+            self.inner
+                .table_make_view_unordered(table_id, view_id, &config, &schema)
+        } else {
+            self.inner
+                .table_make_view(table_id, view_id, &config, &schema)
+        };
+
+        result.map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to create a table from a view.
+    #[wasm_bindgen(js_name = "viewMakeTable")]
+    pub fn view_make_table(
+        &self,
+        view_id: &str,
+        table_id: &str,
+        config: JsValue,
+        view_schema: JsValue,
+        schema: JsValue,
+    ) -> Result<String, JsValue> {
+        let config: ViewConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let view_schema = self.parse_schema(view_schema)?;
+        let schema = if schema.is_undefined() || schema.is_null() {
+            None
+        } else {
+            Some(self.parse_schema(schema)?)
+        };
+
+        self.inner
+            .view_make_table(view_id, table_id, &config, &view_schema, schema.as_ref())
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to fetch data from a view with the given viewport.
+    #[wasm_bindgen(js_name = "viewGetData")]
+    pub fn view_get_data(
+        &self,
+        view_id: &str,
+        config: JsValue,
+        viewport: JsValue,
+        schema: JsValue,
+    ) -> Result<String, JsValue> {
+        let config: ViewConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let viewport: ViewPort = serde_wasm_bindgen::from_value(viewport)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let schema = self.parse_schema(schema)?;
+
+        self.inner
+            .view_get_data(view_id, &config, &viewport, &schema)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to describe a view's schema.
+    #[wasm_bindgen(js_name = "viewSchema")]
+    pub fn view_schema(&self, view_id: &str) -> Result<String, JsValue> {
+        self.inner
+            .view_schema(view_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to get the row count of a view.
+    #[wasm_bindgen(js_name = "viewSize")]
+    pub fn view_size(&self, view_id: &str) -> Result<String, JsValue> {
+        self.inner
+            .view_size(view_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the SQL query to get the min and max values of a column.
+    #[wasm_bindgen(js_name = "viewGetMinMax")]
+    pub fn view_get_min_max(
+        &self,
+        view_id: &str,
+        column_name: &str,
+        config: JsValue,
+    ) -> Result<String, JsValue> {
+        let config: ViewConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        self.inner
+            .view_get_min_max(view_id, column_name, &config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the `UPDATE` expanding the `row_index`-th visible row, whose
+    /// affected-row count is the number of rows shown.
+    #[wasm_bindgen(js_name = "viewExpand")]
+    pub fn view_expand(
+        &self,
+        view_id: &str,
+        config: JsValue,
+        row_index: u32,
+    ) -> Result<String, JsValue> {
+        let config: ViewConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        self.inner
+            .view_expand(view_id, &config, row_index)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the `UPDATE` collapsing the `row_index`-th visible row, whose
+    /// affected-row count is the number of rows hidden.
+    #[wasm_bindgen(js_name = "viewCollapse")]
+    pub fn view_collapse(
+        &self,
+        view_id: &str,
+        config: JsValue,
+        row_index: u32,
+    ) -> Result<String, JsValue> {
+        let config: ViewConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        self.inner
+            .view_collapse(view_id, &config, row_index)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the `UPDATE` expanding exactly the rows whose path is no longer
+    /// than `depth`.
+    #[wasm_bindgen(js_name = "viewSetDepth")]
+    pub fn view_set_depth(
+        &self,
+        view_id: &str,
+        config: JsValue,
+        depth: u32,
+    ) -> Result<String, JsValue> {
+        let config: ViewConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        self.inner
+            .view_set_depth(view_id, &config, depth)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+}
+
+impl GenericSQLVirtualServerModel {
+    fn parse_schema(&self, schema: JsValue) -> Result<IndexMap<String, ColumnType>, JsValue> {
+        let obj = schema.dyn_ref::<Object>().ok_or_else(|| {
+            JsValue::from_str("Schema must be an object mapping column names to types")
+        })?;
+
+        let mut result = IndexMap::new();
+        let entries = Object::entries(obj);
+        for i in 0..entries.length() {
+            let entry = entries.get(i);
+            let entry_array = entry
+                .dyn_ref::<js_sys::Array>()
+                .ok_or_else(|| JsValue::from_str("Invalid schema entry"))?;
+            let key = entry_array
+                .get(0)
+                .as_string()
+                .ok_or_else(|| JsValue::from_str("Column name must be a string"))?;
+            let value = entry_array
+                .get(1)
+                .as_string()
+                .ok_or_else(|| JsValue::from_str("Column type must be a string"))?;
+            let column_type = ColumnType::from_str(&value)
+                .map_err(|_| JsValue::from_str(&format!("Unknown column type: {}", value)))?;
+            result.insert(key, column_type);
+        }
+        Ok(result)
+    }
+}

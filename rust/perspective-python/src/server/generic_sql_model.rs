@@ -1,0 +1,348 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+use std::str::FromStr;
+
+use indexmap::IndexMap;
+use perspective_client::config::ViewConfig;
+use perspective_client::proto::{ColumnType, ViewPort};
+use perspective_client::virtual_server::GenericSQLVirtualServerModel;
+use pyo3::exceptions::PyValueError;
+use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods};
+use pyo3::{Py, PyAny, PyResult, Python, pyclass, pymethods};
+
+#[pyclass(name = "GenericSQLVirtualServerModel")]
+pub struct PyGenericSQLVirtualServerModel {
+    inner: GenericSQLVirtualServerModel,
+}
+
+#[pymethods]
+impl PyGenericSQLVirtualServerModel {
+    #[new]
+    pub fn new(py: Python<'_>, config: Option<Py<PyDict>>) -> Self {
+        Self {
+            inner: GenericSQLVirtualServerModel::new(
+                config
+                    .map(|x| pythonize::depythonize(x.bind(py)).unwrap())
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// The entity id of the hosted table at relation path `parts`, each
+    /// part quoted only when it is not a bare identifier.
+    pub fn table_path(&self, parts: Vec<String>) -> PyResult<String> {
+        let parts = parts.iter().map(String::as_str).collect::<Vec<_>>();
+        self.inner
+            .table_path(&parts)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The SQL relation reference for an entity id.
+    pub fn quote_entity(&self, entity_id: &str) -> PyResult<String> {
+        self.inner
+            .quote_entity(entity_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    pub fn get_hosted_tables(&self) -> PyResult<String> {
+        self.inner
+            .get_hosted_tables()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    pub fn table_schema(&self, table_id: &str) -> PyResult<String> {
+        self.inner
+            .table_schema(table_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    pub fn table_size(&self, table_id: &str) -> PyResult<String> {
+        self.inner
+            .table_size(table_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    pub fn view_column_size(&self, view_id: &str) -> PyResult<String> {
+        self.inner
+            .view_column_size(view_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The SQL query that plans every expression of `config` at once against a
+    /// table, one result column per expression alias, or `None` when the config
+    /// has no expressions.
+    pub fn expressions_describe(
+        &self,
+        table_id: &str,
+        config: Py<PyAny>,
+    ) -> PyResult<Option<String>> {
+        Python::attach(|py| {
+            let config: ViewConfig = pythonize::depythonize(config.bind(py))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+            self.inner
+                .expressions_describe(table_id, &config)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })
+    }
+
+    /// The SQL query that plans ONE expression against a table - for
+    /// attributing a failed `expressions_describe` to the expressions at fault.
+    pub fn expression_describe(&self, table_id: &str, expression: &str) -> PyResult<String> {
+        self.inner
+            .expression_describe(table_id, expression)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The SQL query that plans the view `config` would build and reports its
+    /// result columns without materializing it (`split_by` folded into
+    /// `group_by`, no `PIVOT`), or `None` when the config selects no columns.
+    #[pyo3(signature = (table_id, config, schema=None, unordered=false))]
+    pub fn table_describe(
+        &self,
+        table_id: &str,
+        config: Py<PyAny>,
+        schema: Option<Py<PyAny>>,
+        unordered: bool,
+    ) -> PyResult<Option<String>> {
+        Python::attach(|py| {
+            let config: ViewConfig = pythonize::depythonize(config.bind(py))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+            let schema = match &schema {
+                Some(schema) => {
+                    self.parse_schema(schema.cast_bound::<PyDict>(py).map_err(|_| {
+                        PyValueError::new_err("Schema must be a dict mapping column names to types")
+                    })?)?
+                },
+                None => IndexMap::new(),
+            };
+
+            let result = if unordered {
+                self.inner
+                    .table_describe_unordered(table_id, &config, &schema)
+            } else {
+                self.inner.table_describe(table_id, &config, &schema)
+            };
+
+            result.map_err(|e| PyValueError::new_err(e.to_string()))
+        })
+    }
+
+    pub fn view_delete(&self, view_id: &str) -> PyResult<String> {
+        self.inner
+            .view_delete(view_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    #[pyo3(signature = (table_id, view_id, config, schema=None, unordered=false))]
+    pub fn table_make_view(
+        &self,
+        table_id: &str,
+        view_id: &str,
+        config: Py<PyAny>,
+        schema: Option<Py<PyAny>>,
+        unordered: bool,
+    ) -> PyResult<String> {
+        Python::attach(|py| {
+            let config: ViewConfig = pythonize::depythonize(config.bind(py))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+            let schema = match &schema {
+                Some(schema) => {
+                    self.parse_schema(schema.cast_bound::<PyDict>(py).map_err(|_| {
+                        PyValueError::new_err("Schema must be a dict mapping column names to types")
+                    })?)?
+                },
+                None => IndexMap::new(),
+            };
+
+            let result = if unordered {
+                self.inner
+                    .table_make_view_unordered(table_id, view_id, &config, &schema)
+            } else {
+                self.inner
+                    .table_make_view(table_id, view_id, &config, &schema)
+            };
+
+            result.map_err(|e| PyValueError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (view_id, table_id, config, view_schema, schema=None))]
+    pub fn view_make_table(
+        &self,
+        view_id: &str,
+        table_id: &str,
+        config: Py<PyAny>,
+        view_schema: Py<PyAny>,
+        schema: Option<Py<PyAny>>,
+    ) -> PyResult<String> {
+        Python::attach(|py| {
+            let config: ViewConfig = pythonize::depythonize(config.bind(py))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+            let as_dict = |value: &Py<PyAny>| {
+                self.parse_schema(value.cast_bound::<PyDict>(py).map_err(|_| {
+                    PyValueError::new_err("Schema must be a dict mapping column names to types")
+                })?)
+            };
+
+            let view_schema = as_dict(&view_schema)?;
+            let schema = schema.as_ref().map(as_dict).transpose()?;
+            self.inner
+                .view_make_table(view_id, table_id, &config, &view_schema, schema.as_ref())
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })
+    }
+
+    pub fn view_get_data(
+        &self,
+        view_id: &str,
+        config: Py<PyAny>,
+        viewport: Py<PyAny>,
+        schema: Py<PyAny>,
+    ) -> PyResult<String> {
+        Python::attach(|py| {
+            let config: ViewConfig = pythonize::depythonize(config.bind(py))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+            let viewport: PyViewPort = pythonize::depythonize(viewport.bind(py))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+            let schema = self.parse_schema(schema.cast_bound::<PyDict>(py).map_err(|_| {
+                PyValueError::new_err("Schema must be a dict mapping column names to types")
+            })?)?;
+
+            self.inner
+                .view_get_data(view_id, &config, &viewport.into(), &schema)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })
+    }
+
+    pub fn view_schema(&self, view_id: &str) -> PyResult<String> {
+        self.inner
+            .view_schema(view_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    pub fn view_size(&self, view_id: &str) -> PyResult<String> {
+        self.inner
+            .view_size(view_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    pub fn view_get_min_max(
+        &self,
+        view_id: &str,
+        column_name: &str,
+        config: Py<PyAny>,
+    ) -> PyResult<String> {
+        let config: ViewConfig = Python::attach(|py| {
+            pythonize::depythonize(config.bind(py))
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+
+        self.inner
+            .view_get_min_max(view_id, column_name, &config)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The `UPDATE` expanding the `row_index`-th visible row, whose
+    /// affected-row count is the number of rows shown.
+    pub fn view_expand(
+        &self,
+        view_id: &str,
+        config: Py<PyAny>,
+        row_index: u32,
+    ) -> PyResult<String> {
+        let config: ViewConfig = Python::attach(|py| {
+            pythonize::depythonize(config.bind(py))
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+
+        self.inner
+            .view_expand(view_id, &config, row_index)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The `UPDATE` collapsing the `row_index`-th visible row, whose
+    /// affected-row count is the number of rows hidden.
+    pub fn view_collapse(
+        &self,
+        view_id: &str,
+        config: Py<PyAny>,
+        row_index: u32,
+    ) -> PyResult<String> {
+        let config: ViewConfig = Python::attach(|py| {
+            pythonize::depythonize(config.bind(py))
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+
+        self.inner
+            .view_collapse(view_id, &config, row_index)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The `UPDATE` expanding exactly the rows whose path is no longer than
+    /// `depth`.
+    pub fn view_set_depth(&self, view_id: &str, config: Py<PyAny>, depth: u32) -> PyResult<String> {
+        let config: ViewConfig = Python::attach(|py| {
+            pythonize::depythonize(config.bind(py))
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+
+        self.inner
+            .view_set_depth(view_id, &config, depth)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+}
+
+impl PyGenericSQLVirtualServerModel {
+    fn parse_schema(
+        &self,
+        schema: &pyo3::Bound<'_, PyDict>,
+    ) -> PyResult<IndexMap<String, ColumnType>> {
+        let mut result = IndexMap::new();
+        for (key, value) in schema.iter() {
+            let key: String = key.extract()?;
+            let value: String = value.extract()?;
+            let column_type = ColumnType::from_str(&value)
+                .map_err(|_| PyValueError::new_err(format!("Unknown column type: {}", value)))?;
+
+            result.insert(key, column_type);
+        }
+
+        Ok(result)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PyViewPort {
+    start_row: Option<u32>,
+    start_col: Option<u32>,
+    end_row: Option<u32>,
+    end_col: Option<u32>,
+}
+
+impl From<PyViewPort> for ViewPort {
+    fn from(value: PyViewPort) -> Self {
+        ViewPort {
+            start_row: value.start_row,
+            start_col: value.start_col,
+            end_row: value.end_row,
+            end_col: value.end_col,
+            machine_column_names: None,
+        }
+    }
+}

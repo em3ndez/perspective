@@ -1,25 +1,27 @@
 {
     "name": "webpack-example",
     "private": true,
-    "version": "1.4.0",
-    "description": "An example app built using `@finos/perspective-viewer`.",
+    "version": "5.8.0",
+    "description": "An example app built using `@perspective-dev/viewer`.",
     "scripts": {
+        "webpack_build": "webpack",
         "start": "webpack serve"
     },
     "keywords": [],
     "license": "Apache-2.0",
     "dependencies": {
-        "@finos/perspective": "^1.4.0",
-        "@finos/perspective-viewer": "^1.4.0",
-        "@finos/perspective-viewer-d3fc": "^1.4.0",
-        "@finos/perspective-viewer-datagrid": "^1.4.0"
+        "@perspective-dev/client": "workspace:^",
+        "@perspective-dev/viewer": "workspace:^",
+        "@perspective-dev/viewer-charts": "workspace:^",
+        "@perspective-dev/viewer-datagrid": "workspace:^"
     },
     "devDependencies": {
-        "@finos/perspective-webpack-plugin": "^1.4.0",
-        "css-loader": "^0.28.7",
-        "style-loader": "^0.18.2",
-        "webpack": "^5.14.0",
-        "webpack-cli": "^4.3.1",
-        "webpack-dev-server": "^3.11.2"
+        "arraybuffer-loader": "catalog:",
+        "css-loader": "catalog:",
+        "html-webpack-plugin": "catalog:",
+        "style-loader": "catalog:",
+        "superstore-arrow": "catalog:",
+        "webpack-cli": "catalog:",
+        "webpack": "catalog:"
     }
 }

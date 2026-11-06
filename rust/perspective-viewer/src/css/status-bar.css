@@ -1,0 +1,647 @@
+/* ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+ * ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+ * ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+ * ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+ * ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+ * ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+ * ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+ * ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+ * ┃ This file is part of the Perspective library, distributed under the terms ┃
+ * ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+ * ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ */
+
+:host(:hover) {
+    #status_bar.settings-closed.floating {
+        opacity: 1;
+        transition: none;
+    }
+}
+
+:host {
+    #status_bar.settings-closed {
+        box-shadow: none;
+        padding-right: 10px;
+    }
+
+    #status_bar.updating {
+        box-shadow: none;
+    }
+
+    #status_bar.settings-closed.floating {
+        transition: opacity 0.2s;
+        opacity: 0;
+        position: absolute;
+        padding: 0px;
+        height: auto;
+        min-height: auto;
+        max-height: none;
+        top: calc((var(--psp-status-bar--height, 38px) - 20px) / 2);
+        right: calc(
+            min(48px, (var(--psp-status-bar--height, 38px) - 20px) / 2)
+        );
+    }
+
+    #status_bar {
+        box-shadow: 0 1px 0 0px var(--psp-inactive--color);
+        z-index: 6;
+        display: var(--psp-status-bar--display, flex);
+        align-items: center;
+        background: var(--psp--background-color);
+        padding: var(--psp-status-bar--padding, 0 26px 0 4px);
+        position: relative;
+        height: var(--psp-status-bar--height, 38px);
+        min-height: var(--psp-status-bar--height, 38px);
+        max-height: var(--psp-status-bar--height, 38px);
+        border-radius: var(--psp-status-bar--border-radius);
+        .section {
+            display: flex;
+            align-items: center;
+            pointer-events: none;
+        }
+
+        .section > * {
+            pointer-events: all;
+        }
+
+        #spacer {
+            flex: 1 1000 auto;
+        }
+
+        #panel-bar {
+            flex: 0 0 auto;
+            height: 100%;
+        }
+
+        span#new_panel {
+            & > .icon {
+                -webkit-mask-image: var(--psp-icon--new-panel--mask-image);
+                mask-image: var(--psp-icon--new-panel--mask-image);
+                display: inline-flex;
+                &:before {
+                    line-height: 0;
+                    content: var(--psp-icon--new-panel--mask-image);
+                    visibility: hidden;
+                }
+            }
+
+            span:not(.icon):before {
+                content: var(
+                    --psp-label--new-panel-button--content,
+                    var(--psp-missing)
+                );
+            }
+        }
+
+        /* Exceptions when the menu bar is visible and the settings panel is closed. */
+        #menu-bar {
+            flex: 0 1000000 auto;
+            height: 100%;
+        }
+
+        #plugin-settings {
+            margin-left: auto;
+            align-self: stretch;
+        }
+
+        /* Global-filter chips, rendered inline between the row stats and the
+           menu icons (was a dedicated strip above the panels). Shrinks/clips
+           rather than growing the fixed-height bar. */
+        #global_filter_bar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 0 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            font-size: 11px;
+
+            /* Beat the status bar's generic `span { margin: 0 14px }`. */
+            span {
+                margin: 0;
+            }
+
+            .global-filter-bar-label {
+                opacity: 0.6;
+                pointer-events: none;
+            }
+
+            .global-filter-bar-chips {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                min-width: 0;
+                overflow: hidden;
+            }
+
+            .global-filter-chip {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                padding: 1px 4px 1px 6px;
+                background: var(--psp--background-color, #ffffff);
+                border: 1px solid var(--psp-inactive--color, #c8ccd0);
+                border-radius: 3px;
+                white-space: nowrap;
+            }
+
+            .global-filter-chip-remove {
+                cursor: pointer;
+                opacity: 0.5;
+                font-size: 13px;
+                line-height: 1;
+            }
+
+            .global-filter-chip-remove:hover {
+                opacity: 1;
+            }
+
+            .global-filter-bar-clear {
+                cursor: pointer;
+                opacity: 0.6;
+            }
+
+            .global-filter-bar-clear:hover {
+                opacity: 1;
+            }
+        }
+
+        span {
+            white-space: nowrap;
+            margin: 0px 14px;
+            user-select: none;
+
+            &:hover {
+                color: inherit;
+            }
+        }
+
+        span.icon {
+            height: 100%;
+            /* line-height: 36px; */
+            margin: 0;
+        }
+
+        span#status {
+            background-repeat: no-repeat;
+            background-color: var(--psp--color);
+            mask-size: contain;
+            mask-repeat: no-repeat;
+            mask-position: center;
+            pointer-events: none;
+            image-rendering: pixelated;
+            margin: 0 5px;
+        }
+
+        /* span#status_updating */
+
+        span#status.loading {
+            image-rendering: pixelated;
+            mask-image: var(--psp-icon--downloading--mask-image);
+            -webkit-mask-image: var(--psp-icon--downloading--mask-image);
+            &:before {
+                visibility: hidden;
+                content: var(--psp-icon--downloading--mask-image);
+                line-height: 0;
+            }
+        }
+
+        span#status.uninitialized {
+            background-color: transparent;
+        }
+
+        span#status.pending {
+            background-color: var(--psp-inactive--color);
+            mask-image: var(--psp-icon--status-pending--mask-image);
+            -webkit-mask-image: var(--psp-icon--status-pending--mask-image);
+            &:before {
+                visibility: hidden;
+                content: var(--psp-icon--status-pending--mask-image);
+                line-height: 0;
+            }
+        }
+
+        span#status.connected,
+        span#status.updating {
+            mask-image: var(--psp-icon--status-ok--mask-image);
+            -webkit-mask-image: var(--psp-icon--status-ok--mask-image);
+            &:before {
+                visibility: hidden;
+                content: var(--psp-icon--status-ok--mask-image);
+                line-height: 0;
+            }
+        }
+
+        .error-dialog {
+            position: absolute;
+            z-index: 1;
+            width: 100%;
+            flex-direction: column;
+            max-height: 300px;
+            top: 0;
+            left: 0;
+            padding: 0px 0px 0px 50px;
+            display: none;
+            white-space: pre-wrap;
+            color: var(--psp--background-color);
+            background: var(--psp--color);
+            border-radius: var(--psp-status-bar--border-radius);
+        }
+
+        .error-dialog-message {
+            white-space: nowrap;
+            overflow: hidden;
+            align-items: center;
+            display: flex;
+            padding-right: 17px;
+            height: var(--psp-status-bar--height, 38px);
+            min-height: var(--psp-status-bar--height, 38px);
+        }
+
+        .error-dialog-stack {
+            font-size: 10px;
+            padding-right: 17px;
+            color: var(--psp-inactive--color);
+            overflow-y: auto;
+            padding-bottom: 24px;
+        }
+
+        .section:hover .error-dialog {
+            display: flex;
+        }
+
+        div#status_reconnect {
+            z-index: 2;
+            display: var(--status-indicator--display, flex);
+            align-items: center;
+            border-radius: 3px;
+            margin: 0;
+            height: auto;
+            border: 1px solid
+                var(--psp-status-icon--ok--border-color, transparent);
+            cursor: var(--psp-status-icon--ok--cursor);
+            pointer-events: var(--psp-status-icon--pointer-events, none);
+            &:hover {
+                background-color: var(
+                    --psp-status-icon--ok-hover--background-color,
+                    transparent
+                );
+                border-color: var(
+                    --psp-status-icon--ok-hover--border-color,
+                    transparent
+                );
+                span#status {
+                    background-color: var(
+                        --psp-status-icon--ok-hover--color,
+                        var(--psp--color)
+                    );
+                }
+            }
+
+            &.errored {
+                pointer-events: all;
+                display: flex;
+                cursor: pointer;
+            }
+
+            &.errored.disabled {
+                cursor: auto;
+                pointer-events: none;
+            }
+
+            span#status.errored {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 20px;
+                width: 20px;
+                border-radius: 10px;
+                color: var(--psp--background-color);
+                &:before {
+                    content: "!";
+                }
+            }
+
+            &.errored:hover {
+                background-color: var(--psp--color);
+                span#status.errored {
+                    color: var(--psp--color);
+                    background-color: var(--psp--background-color);
+                }
+            }
+        }
+
+        /* Status bar status icon animations */
+        span#status_updating {
+            position: absolute;
+            display: inline-flex;
+            margin: 0 5px;
+            opacity: 0;
+            background-repeat: no-repeat;
+            background-color: var(--psp--color);
+            -webkit-mask-size: cover;
+            mask-size: cover;
+            pointer-events: none;
+            image-rendering: pixelated;
+            mask-image: var(--psp-icon--updating--mask-image);
+            -webkit-mask-image: var(--psp-icon--updating--mask-image);
+            &:before {
+                visibility: hidden;
+                content: var(--psp-icon--updating--mask-image);
+                line-height: 0;
+            }
+        }
+
+        span#status.updating {
+            animation-name: status-bar-updating-inverse;
+            animation-fill-mode: forwards;
+            animation-iteration-count: 1;
+            animation-duration: 0.3s;
+        }
+
+        span#status_updating.updating {
+            animation-name: status-bar-updating;
+            animation-fill-mode: forwards;
+            animation-iteration-count: 1;
+            animation-duration: 0.3s;
+        }
+
+        .button > .icon {
+            background-repeat: no-repeat;
+            background-color: var(--psp--color);
+            -webkit-mask-size: cover;
+            mask-size: cover;
+            pointer-events: none;
+            display: inline-block;
+        }
+
+        span#export {
+            & > .icon {
+                -webkit-mask-image: var(--psp-icon--export--mask-image);
+                mask-image: var(--psp-icon--export--mask-image);
+                display: inline-flex;
+                &:before {
+                    line-height: 0;
+                    content: var(--psp-icon--export--mask-image);
+                    visibility: hidden;
+                }
+            }
+
+            span:not(.icon):before {
+                content: var(
+                    --psp-label--export-button--content,
+                    var(--psp-missing)
+                );
+            }
+        }
+
+        span#lock {
+            & > .icon {
+                -webkit-mask-image: var(--psp-icon--free-scroll--mask-image);
+                mask-image: var(--psp-icon--free-scroll--mask-image);
+
+                &:before {
+                    line-height: 0;
+                    content: var(--psp-icon--free-scroll--mask-image);
+                    visibility: hidden;
+                }
+            }
+        }
+
+        span#reset {
+            & > .icon {
+                -webkit-mask-image: var(--psp-icon--reset--mask-image);
+                mask-image: var(--psp-icon--reset--mask-image);
+                display: inline-flex;
+                &:before {
+                    line-height: 0;
+                    content: var(--psp-icon--reset--mask-image);
+                    visibility: hidden;
+                }
+            }
+            span:not(.icon):before {
+                content: var(
+                    --psp-label--reset-button--content,
+                    var(--psp-missing)
+                );
+            }
+        }
+
+        span#copy {
+            & > .icon {
+                -webkit-mask-image: var(--psp-icon--copy--mask-image);
+                mask-image: var(--psp-icon--copy--mask-image);
+                display: inline-flex;
+
+                &:before {
+                    line-height: 0;
+                    content: var(--psp-icon--copy--mask-image);
+                    visibility: hidden;
+                }
+            }
+
+            span:not(.icon):before {
+                content: var(
+                    --psp-label--copy-button--content,
+                    var(--psp-missing)
+                );
+            }
+        }
+
+        #theme_icon {
+            margin-right: -32px;
+            height: 100%;
+            width: 28px;
+            z-index: 1;
+        }
+
+        #theme_icon.modified {
+            cursor: pointer;
+        }
+
+        #theme {
+            align-self: stretch;
+            border-radius: 0px;
+            select {
+                height: 100%;
+            }
+
+            .select-arrow {
+                margin: 0;
+            }
+
+            & > .icon {
+                margin: 0 2px 0 2px;
+                height: auto;
+                -webkit-mask-image: var(--psp-icon--theme--mask-image);
+                mask-image: var(--psp-icon--theme--mask-image);
+                display: inline-flex;
+                &:before {
+                    line-height: 0;
+                    content: var(--psp-icon--theme--mask-image);
+                    visibility: hidden;
+                }
+            }
+
+            & > .dropdown-width-container {
+                padding-left: 5px;
+            }
+        }
+
+        #theme_icon.modified:hover + #theme > .icon {
+            -webkit-mask-image: var(--psp-icon--close--mask-image);
+            mask-image: var(--psp-icon--close--mask-image);
+        }
+
+        #theme_selector {
+            max-width: 100px;
+            text-overflow: ellipsis;
+            font-size: 0.8em;
+        }
+
+        .button {
+            display: inline-flex;
+            justify-content: center;
+            align-items: center;
+            margin: 0px;
+            padding: 0 5px;
+            color: var(--psp-inactive--color, #ccc);
+            border: 1px solid transparent;
+            border-radius: 3px;
+            font-size: var(--label--font-size, 0.75em);
+
+            & > span,
+            & > .dropdown-width-container {
+                pointer-events: none;
+                overflow: hidden;
+                display: none;
+            }
+
+            & > .icon {
+                z-index: 1;
+            }
+        }
+
+        .modal-target .button > span.icon-label {
+            display: none !important;
+        }
+
+        .hover-target {
+            margin: 0;
+            display: inline-flex;
+            height: 100%;
+            align-items: center;
+
+            &:focus-within,
+            &:hover:not(.modal-target) {
+                box-shadow:
+                    -4px 0 0 var(--psp--color),
+                    4px 0 0 var(--psp--color);
+            }
+
+            &:focus-within,
+            &:hover,
+            &.modal-target {
+                background-color: var(--psp--color);
+            }
+
+            &:focus-within .button select,
+            &:hover .button select {
+                background-color: transparent;
+            }
+
+            .modal-target .button > span {
+                color: var(--psp--color) !important;
+            }
+
+            &:focus-within .button,
+            &:hover .button,
+            &.modal-target .button {
+                position: relative;
+                min-width: var(--psp-button--min-width, 33px);
+                color: inherit;
+                cursor: pointer;
+                transition: none;
+                background-color: var(--psp--color);
+                color: var(--psp--background-color);
+
+                & > .icon {
+                    background-color: var(--psp--background-color);
+                }
+
+                & > span:not(.icon) {
+                    /* The label. */
+                    display: block;
+                    text-align: center;
+                    position: absolute;
+                    top: calc(100% + 3px);
+                    left: 50%;
+                    translate: -50%;
+                    margin: 0;
+                    padding: 5px;
+                    height: auto;
+                    white-space: nowrap;
+                    line-height: 1;
+                    width: 41px;
+                    background-color: var(--psp--color);
+                    border-radius: 0 0 3px 3px;
+                }
+
+                & > .dropdown-width-container {
+                    display: block;
+                    margin: 0;
+                    white-space: nowrap;
+                    line-height: 1;
+                    background-color: var(--psp--color);
+                    pointer-events: all;
+
+                    & > select {
+                        position: static;
+                        cursor: pointer;
+                    }
+
+                    &::before {
+                        content: "";
+                        display: block;
+                        position: absolute;
+                        inset-block-start: -3px;
+                        inset-inline-start: 0;
+                        inline-size: 100%;
+                        block-size: 3px;
+                    }
+                    &::after {
+                        content: none;
+                    }
+                }
+            }
+        }
+    }
+}
+
+@keyframes status-bar-updating {
+    0% {
+        opacity: 0;
+    }
+
+    99% {
+        opacity: 0;
+    }
+
+    100% {
+        opacity: 1;
+    }
+}
+
+@keyframes status-bar-updating-inverse {
+    0% {
+        opacity: 1;
+    }
+
+    99% {
+        opacity: 1;
+    }
+
+    100% {
+        opacity: 0;
+    }
+}

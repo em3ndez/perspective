@@ -1,0 +1,778 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+use std::error::Error;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+
+use chrono::{DateTime, TimeZone, Utc};
+use indexmap::IndexMap;
+use perspective_client::proto::{ColumnType, HostedTable};
+use perspective_client::virtual_server::{
+    Features, ResultExt, RowPathStyle, VirtualDataSlice, VirtualServer, VirtualServerFuture,
+    VirtualServerHandler,
+};
+use perspective_client::{DescribeError, DescribeVerdict, Description};
+use pyo3::exceptions::PyValueError;
+use pyo3::types::{
+    PyAnyMethods, PyBytes, PyDate, PyDict, PyDictMethods, PyList, PyListMethods, PyString,
+};
+use pyo3::{IntoPyObject, Py, PyAny, PyErr, PyResult, Python, pyclass, pymethods};
+use serde::Serialize;
+
+fn py_to_scalar(val: pyo3::Bound<'_, PyAny>) -> PyResult<perspective_client::config::Scalar> {
+    if val.is_none() {
+        Ok(perspective_client::config::Scalar::Null)
+    } else if let Ok(b) = val.extract::<bool>() {
+        Ok(perspective_client::config::Scalar::Bool(b))
+    } else if let Ok(f) = val.extract::<f64>() {
+        Ok(perspective_client::config::Scalar::Float(f))
+    } else if let Ok(s) = val.extract::<String>() {
+        Ok(perspective_client::config::Scalar::String(s))
+    } else {
+        Ok(perspective_client::config::Scalar::Null)
+    }
+}
+
+pub struct PyServerHandler(Py<PyAny>);
+
+impl PyServerHandler {
+    /// Calls a `(view_name, config, n)` tree method, returning its integer
+    /// result (`0` when it returns `None`).
+    fn call_tree_method(
+        &self,
+        method: &'static str,
+        view_id: &str,
+        config: &perspective_client::config::ViewConfig,
+        arg: u32,
+    ) -> impl std::future::Future<Output = PyResult<u32>> + Send + 'static {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let view_id = view_id.to_string();
+        let config = config.clone();
+        async move {
+            Python::attach(|py| {
+                let result = handler.call_method1(
+                    py,
+                    method,
+                    (&view_id, pythonize::pythonize(py, &config)?, arg),
+                )?;
+
+                Ok(result.extract::<Option<u32>>(py)?.unwrap_or(0))
+            })
+        }
+    }
+}
+
+impl VirtualServerHandler for PyServerHandler {
+    type Error = PyErr;
+
+    fn get_features(&self) -> VirtualServerFuture<'_, Result<Features<'_>, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        Box::pin(async move {
+            Python::attach(|py| {
+                if handler
+                    .getattr(py, pyo3::intern!(py, "get_features"))
+                    .is_ok()
+                {
+                    Ok(pythonize::depythonize(
+                        handler.call_method0(py, "get_features")?.bind(py),
+                    )?)
+                } else {
+                    Ok(Features::default())
+                }
+            })
+        })
+    }
+
+    fn get_hosted_tables(&self) -> VirtualServerFuture<'_, Result<Vec<HostedTable>, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        Box::pin(async move {
+            Python::attach(|py| {
+                Ok(handler
+                    .call_method0(py, pyo3::intern!(py, "get_hosted_tables"))?
+                    .cast_bound::<PyList>(py)?
+                    .iter()
+                    .flat_map(|x| {
+                        Ok::<_, PyErr>(if x.is_instance_of::<PyString>() {
+                            HostedTable {
+                                entity_id: x.to_string(),
+                                index: Vec::new(),
+                                limit: None,
+                            }
+                        } else {
+                            HostedTable {
+                                entity_id: x.get_item("name")?.to_string(),
+                                index: x
+                                    .get_item("index")
+                                    .ok()
+                                    .and_then(|x| {
+                                        x.extract::<String>()
+                                            .map(|s| vec![s])
+                                            .or_else(|_| x.extract::<Vec<String>>())
+                                            .ok()
+                                    })
+                                    .unwrap_or_default(),
+                                limit: x.get_item("limit").ok().and_then(|x| x.extract().ok()),
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>())
+            })
+        })
+    }
+
+    fn table_schema(
+        &self,
+        table_id: &str,
+    ) -> VirtualServerFuture<'_, Result<IndexMap<String, ColumnType>, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let table_id = table_id.to_string();
+        Box::pin(async move {
+            Python::attach(|py| {
+                Ok(handler
+                    .call_method1(py, pyo3::intern!(py, "table_schema"), (&table_id,))?
+                    .cast_bound::<PyDict>(py)?
+                    .items()
+                    .extract::<Vec<(String, String)>>()?
+                    .into_iter()
+                    .map(|(k, v)| (k, ColumnType::from_str(&v).unwrap()))
+                    .collect())
+            })
+        })
+    }
+
+    fn table_size(&self, table_id: &str) -> VirtualServerFuture<'_, Result<u32, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let table_id = table_id.to_string();
+        Box::pin(async move {
+            Python::attach(|py| {
+                handler
+                    .call_method1(py, pyo3::intern!(py, "table_size"), (&table_id,))?
+                    .extract::<u32>(py)
+            })
+        })
+    }
+
+    fn table_column_size(
+        &self,
+        table_id: &str,
+    ) -> VirtualServerFuture<'_, Result<u32, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let table_id = table_id.to_string();
+
+        Box::pin(async move {
+            let has_table_column_size =
+                Python::attach(|py| handler.getattr(py, "table_column_size").is_ok());
+            if has_table_column_size {
+                Python::attach(|py| {
+                    handler
+                        .call_method1(py, pyo3::intern!(py, "table_column_size"), (&table_id,))?
+                        .extract::<u32>(py)
+                })
+            } else {
+                Ok(self.table_schema(&table_id).await?.len() as u32)
+            }
+        })
+    }
+
+    fn table_describe(
+        &mut self,
+        table_id: &str,
+        config: &perspective_client::config::ViewConfig,
+    ) -> VirtualServerFuture<'_, Result<Result<Description, DescribeError>, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let table_id = table_id.to_string();
+        let config = config.clone();
+        Box::pin(async move {
+            Python::attach(|py| {
+                let name = pyo3::intern!(py, "table_describe");
+                if handler.getattr(py, name).is_err() {
+                    return Err(PyValueError::new_err(
+                        "`table_describe` is required of a virtual server handler",
+                    ));
+                }
+
+                let result = handler.call_method1(
+                    py,
+                    name,
+                    (&table_id, pythonize::pythonize(py, &config)?),
+                )?;
+
+                let verdict: DescribeVerdict =
+                    pythonize::depythonize(result.bind(py)).map_err(|e| {
+                        PyValueError::new_err(format!(
+                            "`table_describe` must return a describe verdict dict: {e}"
+                        ))
+                    })?;
+
+                Result::<Description, DescribeError>::try_from(verdict)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))
+            })
+        })
+    }
+
+    fn table_make_view(
+        &mut self,
+        table_id: &str,
+        view_id: &str,
+        config: &mut perspective_client::config::ViewConfigUpdate,
+    ) -> VirtualServerFuture<'_, Result<String, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let table_id = table_id.to_string();
+        let view_id = view_id.to_string();
+        let config = config.clone();
+        Box::pin(async move {
+            Python::attach(|py| {
+                let _ = handler
+                    .call_method1(
+                        py,
+                        pyo3::intern!(py, "table_make_view"),
+                        (&table_id, &view_id, pythonize::pythonize(py, &config)?),
+                    )?
+                    .extract::<String>(py);
+
+                Ok(view_id.to_string())
+            })
+        })
+    }
+
+    fn view_schema(
+        &self,
+        view_id: &str,
+        config: &perspective_client::config::ViewConfig,
+    ) -> VirtualServerFuture<'_, Result<IndexMap<String, ColumnType>, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let view_id = view_id.to_string();
+        let config = config.clone();
+        Box::pin(async move {
+            Python::attach(|py| {
+                let has_view_schema = handler.getattr(py, "view_schema").is_ok();
+                let args = if has_view_schema {
+                    (&view_id, pythonize::pythonize(py, &config)?).into_pyobject(py)?
+                } else {
+                    (&view_id,).into_pyobject(py)?
+                };
+
+                Ok(handler
+                    .call_method1(
+                        py,
+                        if has_view_schema {
+                            pyo3::intern!(py, "view_schema")
+                        } else {
+                            pyo3::intern!(py, "table_schema")
+                        },
+                        args,
+                    )?
+                    .cast_bound::<PyDict>(py)?
+                    .items()
+                    .extract::<Vec<(String, String)>>()?
+                    .into_iter()
+                    .map(|(k, v)| (k, ColumnType::from_str(&v).unwrap()))
+                    .collect())
+            })
+        })
+    }
+
+    fn view_size(&self, view_id: &str) -> VirtualServerFuture<'_, Result<u32, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let view_id = view_id.to_string();
+        Box::pin(async move {
+            Python::attach(|py| {
+                handler
+                    .call_method1(py, pyo3::intern!(py, "view_size"), (&view_id,))?
+                    .extract::<u32>(py)
+            })
+        })
+    }
+
+    fn view_column_size(
+        &self,
+        view_id: &str,
+        config: &perspective_client::config::ViewConfig,
+    ) -> VirtualServerFuture<'_, Result<u32, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let view_id = view_id.to_string();
+        let config = config.clone();
+        Box::pin(async move {
+            let has_table_column_size =
+                Python::attach(|py| handler.getattr(py, "view_column_size").is_ok());
+            if has_table_column_size {
+                Python::attach(|py| {
+                    handler
+                        .call_method1(
+                            py,
+                            pyo3::intern!(py, "view_column_size"),
+                            (&view_id, pythonize::pythonize(py, &config)?).into_pyobject(py)?,
+                        )?
+                        .extract::<u32>(py)
+                })
+            } else {
+                Ok(self.view_schema(&view_id, &config).await?.len() as u32)
+            }
+        })
+    }
+
+    fn view_make_table(
+        &mut self,
+        view_id: &str,
+        table_id: &str,
+        config: &perspective_client::config::ViewConfig,
+        schema: Option<&IndexMap<String, ColumnType>>,
+    ) -> VirtualServerFuture<'_, Result<(), Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let view_id = view_id.to_string();
+        let table_id = table_id.to_string();
+        let config = config.clone();
+        let schema = schema.cloned();
+        Box::pin(async move {
+            Python::attach(|py| {
+                let schema = schema
+                    .map(|schema| {
+                        let dict = PyDict::new(py);
+                        for (name, ty) in schema {
+                            dict.set_item(name, ty.to_string())?;
+                        }
+
+                        PyResult::Ok(dict)
+                    })
+                    .transpose()?;
+
+                handler.call_method1(
+                    py,
+                    pyo3::intern!(py, "view_make_table"),
+                    (
+                        &view_id,
+                        &table_id,
+                        pythonize::pythonize(py, &config)?,
+                        schema,
+                    ),
+                )?;
+
+                Ok(())
+            })
+        })
+    }
+
+    fn view_delete(&self, view_id: &str) -> VirtualServerFuture<'_, Result<(), Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let view_id = view_id.to_string();
+        Box::pin(async move {
+            Python::attach(|py| {
+                handler.call_method1(py, pyo3::intern!(py, "view_delete"), (&view_id,))?;
+                Ok(())
+            })
+        })
+    }
+
+    fn table_delete(&self, table_id: &str) -> VirtualServerFuture<'_, Result<(), Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let table_id = table_id.to_string();
+        Box::pin(async move {
+            Python::attach(|py| {
+                let method = if handler.getattr(py, "table_delete").is_ok() {
+                    pyo3::intern!(py, "table_delete")
+                } else {
+                    pyo3::intern!(py, "view_delete")
+                };
+
+                handler.call_method1(py, method, (&table_id,))?;
+                Ok(())
+            })
+        })
+    }
+
+    fn view_get_min_max(
+        &self,
+        view_id: &str,
+        column_name: &str,
+        config: &perspective_client::config::ViewConfig,
+    ) -> VirtualServerFuture<
+        '_,
+        Result<
+            (
+                perspective_client::config::Scalar,
+                perspective_client::config::Scalar,
+            ),
+            Self::Error,
+        >,
+    > {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let view_id = view_id.to_string();
+        let column_name = column_name.to_string();
+        let config = config.clone();
+        Box::pin(async move {
+            Python::attach(|py| {
+                let has_method = handler
+                    .getattr(py, pyo3::intern!(py, "view_get_min_max"))
+                    .is_ok();
+
+                if !has_method {
+                    return Err(PyValueError::new_err("view_get_min_max not implemented"));
+                }
+
+                let config_py = pythonize::pythonize(py, &config)?;
+                let result = handler.call_method1(
+                    py,
+                    pyo3::intern!(py, "view_get_min_max"),
+                    (&view_id, &column_name, config_py),
+                )?;
+
+                let tuple = result.cast_bound::<pyo3::types::PyTuple>(py)?;
+                let min = py_to_scalar(tuple.get_item(0)?)?;
+                let max = py_to_scalar(tuple.get_item(1)?)?;
+                Ok((min, max))
+            })
+        })
+    }
+
+    fn view_expand(
+        &mut self,
+        view_id: &str,
+        config: &perspective_client::config::ViewConfig,
+        row_index: u32,
+    ) -> VirtualServerFuture<'_, Result<u32, Self::Error>> {
+        Box::pin(self.call_tree_method("view_expand", view_id, config, row_index))
+    }
+
+    fn view_collapse(
+        &mut self,
+        view_id: &str,
+        config: &perspective_client::config::ViewConfig,
+        row_index: u32,
+    ) -> VirtualServerFuture<'_, Result<u32, Self::Error>> {
+        Box::pin(self.call_tree_method("view_collapse", view_id, config, row_index))
+    }
+
+    fn view_set_depth(
+        &mut self,
+        view_id: &str,
+        config: &perspective_client::config::ViewConfig,
+        depth: u32,
+    ) -> VirtualServerFuture<'_, Result<(), Self::Error>> {
+        let fut = self.call_tree_method("view_set_depth", view_id, config, depth);
+        Box::pin(async move {
+            fut.await?;
+            Ok(())
+        })
+    }
+
+    fn view_get_data(
+        &self,
+        view_id: &str,
+        config: &perspective_client::config::ViewConfig,
+        schema: &IndexMap<String, ColumnType>,
+        viewport: &perspective_client::proto::ViewPort,
+    ) -> VirtualServerFuture<'_, Result<VirtualDataSlice, Self::Error>> {
+        let handler = Python::attach(|py| self.0.clone_ref(py));
+        let view_id = view_id.to_string();
+        let config = config.clone();
+        let schema = schema.clone();
+        let window: PyViewPort = viewport.clone().into();
+        Box::pin(async move {
+            Python::attach(|py| {
+                let data = PyVirtualDataSlice(Arc::new(Mutex::new(Some(VirtualDataSlice::new(
+                    config.clone(),
+                )))));
+                let _ = handler.call_method1(
+                    py,
+                    pyo3::intern!(py, "view_get_data"),
+                    (
+                        &view_id,
+                        pythonize::pythonize(py, &config)?,
+                        pythonize::pythonize(py, &schema)?,
+                        pythonize::pythonize(py, &window)?,
+                        data.clone(),
+                    ),
+                )?;
+
+                data.take()
+            })
+        })
+    }
+}
+
+#[derive(Serialize, PartialEq)]
+pub struct PyViewPort {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_row: ::core::option::Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_col: ::core::option::Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_row: ::core::option::Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_col: ::core::option::Option<u32>,
+}
+
+impl From<perspective_client::proto::ViewPort> for PyViewPort {
+    fn from(value: perspective_client::proto::ViewPort) -> Self {
+        PyViewPort {
+            start_row: value.start_row,
+            start_col: value.start_col,
+            end_row: value.end_row,
+            end_col: value.end_col,
+        }
+    }
+}
+
+#[derive(Clone)]
+#[pyclass(skip_from_py_object, name = "VirtualDataSlice")]
+pub struct PyVirtualDataSlice(Arc<Mutex<Option<VirtualDataSlice>>>);
+
+impl PyVirtualDataSlice {
+    /// Runs `f` on the slice, raising if it was already consumed by
+    /// `view_get_data`.
+    fn with_slice<T>(
+        &self,
+        f: impl FnOnce(&mut VirtualDataSlice) -> Result<T, Box<dyn Error>>,
+    ) -> PyResult<T> {
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let slice = guard.as_mut().ok_or_else(consumed_error)?;
+        f(slice).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Moves the slice out, leaving any Python references holding a consumed
+    /// slice.
+    fn take(&self) -> PyResult<VirtualDataSlice> {
+        self.0
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .take()
+            .ok_or_else(consumed_error)
+    }
+}
+
+fn consumed_error() -> PyErr {
+    PyValueError::new_err("VirtualDataSlice was consumed when view_get_data returned")
+}
+
+#[pymethods]
+impl PyVirtualDataSlice {
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_arrow_ipc(&self, ipc: &[u8]) -> PyResult<()> {
+        self.with_slice(|slice| slice.from_arrow_ipc(ipc))
+    }
+
+    pub fn render_to_columns_json(&self) -> PyResult<String> {
+        self.with_slice(|slice| slice.render_to_columns_json(RowPathStyle::Sidecar, false))
+    }
+
+    #[pyo3(signature=(dtype, name, index, val, grouping_id = None))]
+    pub fn set_col(
+        &self,
+        dtype: &str,
+        name: &str,
+        index: u32,
+        val: Py<PyAny>,
+        grouping_id: Option<usize>,
+    ) -> PyResult<()> {
+        match dtype {
+            "string" => self.set_string_col(name, index, val, grouping_id),
+            "integer" => self.set_integer_col(name, index, val, grouping_id),
+            "float" => self.set_float_col(name, index, val, grouping_id),
+            "date" => self.set_datetime_col(name, index, val, grouping_id),
+            "datetime" => self.set_datetime_col(name, index, val, grouping_id),
+            "boolean" => self.set_boolean_col(name, index, val, grouping_id),
+            _ => Err(PyValueError::new_err("Unknown type")),
+        }
+    }
+
+    #[pyo3(signature=(name, index, val, grouping_id = None))]
+    pub fn set_string_col(
+        &self,
+        name: &str,
+        index: u32,
+        val: Py<PyAny>,
+        grouping_id: Option<usize>,
+    ) -> PyResult<()> {
+        Python::attach(|py| {
+            if val.is_none(py) {
+                self.with_slice(|slice| {
+                    slice.set_col(name, grouping_id, index as usize, None as Option<String>)
+                })?;
+            } else if let Ok(val) = val.cast_bound::<PyString>(py) {
+                self.with_slice(|slice| {
+                    slice.set_col(
+                        name,
+                        grouping_id,
+                        index as usize,
+                        val.extract::<String>().ok(),
+                    )
+                })?;
+            } else {
+                tracing::error!("Unhandled")
+            };
+
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature=(name, index, val, grouping_id = None))]
+    pub fn set_integer_col(
+        &self,
+        name: &str,
+        index: u32,
+        val: Py<PyAny>,
+        grouping_id: Option<usize>,
+    ) -> PyResult<()> {
+        Python::attach(|py| {
+            if val.is_none(py) {
+                self.with_slice(|slice| {
+                    slice.set_col(name, grouping_id, index as usize, None as Option<i32>)
+                })?;
+            } else if let Ok(val) = val.extract::<i32>(py) {
+                self.with_slice(|slice| {
+                    slice.set_col(name, grouping_id, index as usize, Some(val))
+                })?;
+            } else {
+                tracing::error!("Unhandled")
+            };
+
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature=(name, index, val, grouping_id = None))]
+    pub fn set_float_col(
+        &self,
+        name: &str,
+        index: u32,
+        val: Py<PyAny>,
+        grouping_id: Option<usize>,
+    ) -> PyResult<()> {
+        Python::attach(|py| {
+            if val.is_none(py) {
+                self.with_slice(|slice| {
+                    slice.set_col(name, grouping_id, index as usize, None as Option<f64>)
+                })?;
+            } else if let Ok(val) = val.extract::<f64>(py) {
+                self.with_slice(|slice| {
+                    slice.set_col(name, grouping_id, index as usize, Some(val))
+                })?;
+            } else {
+                tracing::error!("Unhandled")
+            };
+
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature=(name, index, val, grouping_id = None))]
+    pub fn set_boolean_col(
+        &self,
+        name: &str,
+        index: u32,
+        val: Py<PyAny>,
+        grouping_id: Option<usize>,
+    ) -> PyResult<()> {
+        Python::attach(|py| {
+            if val.is_none(py) {
+                self.with_slice(|slice| {
+                    slice.set_col(name, grouping_id, index as usize, None as Option<bool>)
+                })?;
+            } else if let Ok(val) = val.extract::<bool>(py) {
+                self.with_slice(|slice| {
+                    slice.set_col(name, grouping_id, index as usize, Some(val))
+                })?;
+            } else {
+                tracing::error!("Unhandled")
+            };
+
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature=(name, index, val, grouping_id = None))]
+    pub fn set_datetime_col(
+        &self,
+        name: &str,
+        index: u32,
+        val: Py<PyAny>,
+        grouping_id: Option<usize>,
+    ) -> PyResult<()> {
+        Python::attach(|py| {
+            if val.is_none(py) {
+                self.with_slice(|slice| {
+                    slice.set_col(name, grouping_id, index as usize, None as Option<i64>)
+                })?;
+            } else if let Ok(val) = val.cast_bound::<PyDate>(py) {
+                let dt: DateTime<Utc> = Utc
+                    .with_ymd_and_hms(
+                        val.getattr("year")?.extract()?,
+                        val.getattr("month")?.extract()?,
+                        val.getattr("day")?.extract()?,
+                        0,
+                        0,
+                        0,
+                    )
+                    .unwrap();
+                let timestamp = dt.timestamp() * 1000;
+                self.with_slice(|slice| {
+                    slice.set_col(name, grouping_id, index as usize, Some(timestamp))
+                })?;
+            } else if let Ok(val) = val.extract::<i64>(py) {
+                self.with_slice(|slice| {
+                    slice.set_col(name, grouping_id, index as usize, Some(val))
+                })?;
+            } else {
+                tracing::error!("Unhandled")
+            };
+
+            Ok(())
+        })
+    }
+}
+
+#[pyclass(name = "VirtualServer")]
+pub struct PyVirtualServer(VirtualServer<PyServerHandler>);
+
+#[pymethods]
+impl PyVirtualServer {
+    #[new]
+    pub fn new(handler: Py<PyAny>) -> PyResult<Self> {
+        Ok(PyVirtualServer(VirtualServer::new(PyServerHandler(
+            handler,
+        ))))
+    }
+
+    /// Deletes every view this session still holds.
+    pub fn close(&mut self) -> PyResult<()> {
+        match futures::executor::block_on(self.0.close()).get_internal_error() {
+            Ok(()) => Ok(()),
+            Err(Ok(x)) => Err(x),
+            Err(Err(x)) => Err(PyValueError::new_err(x)),
+        }
+    }
+
+    pub fn handle_request(&mut self, bytes: Py<PyBytes>) -> PyResult<Py<PyBytes>> {
+        Python::attach(|py| {
+            let bytes_vec = bytes.as_bytes(py).to_vec();
+
+            // Use futures::executor::block_on to run the async code
+            // synchronously
+            let result = futures::executor::block_on(async {
+                self.0.handle_request(bytes::Bytes::from(bytes_vec)).await
+            });
+
+            match result.get_internal_error() {
+                Ok(x) => Ok(PyBytes::new(py, &x).unbind()),
+                Err(Ok(x)) => Err(x),
+                Err(Err(x)) => Err(PyValueError::new_err(x)),
+            }
+        })
+    }
+}

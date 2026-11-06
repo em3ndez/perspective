@@ -1,0 +1,67 @@
+{
+    "name": "@perspective-dev/react",
+    "version": "5.8.0",
+    "description": "React data grid, pivot table and charts for large, real-time and streaming datasets — React bindings for `<perspective-viewer>`.",
+    "keywords": [
+        "perspective",
+        "datagrid",
+        "data-grid",
+        "pivot-table",
+        "pivot",
+        "charts",
+        "visualization",
+        "dashboard",
+        "analytics",
+        "bi",
+        "streaming",
+        "real-time",
+        "wasm",
+        "webassembly",
+        "arrow",
+        "react",
+        "react-component",
+        "web-component"
+    ],
+    "homepage": "https://perspective-dev.github.io",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/perspective-dev/perspective.git",
+        "directory": "packages/react"
+    },
+    "license": "Apache-2.0",
+    "sideEffects": false,
+    "files": [
+        "dist/**/*"
+    ],
+    "exports": {
+        ".": {
+            "types": "./dist/esm/index.d.ts",
+            "import": "./dist/esm/index.js",
+            "default": "./dist/esm/index.js"
+        },
+        "./package.json": "./package.json"
+    },
+    "type": "module",
+    "scripts": {
+        "build": "node ./build.mjs",
+        "clean": "node ./clean.mjs",
+        "docs": "node ./docs.mjs"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "dependencies": {
+        "@perspective-dev/client": "workspace:^",
+        "@perspective-dev/viewer": "workspace:^",
+        "@types/react": "catalog:",
+        "react": "catalog:",
+        "react-dom": "catalog:"
+    },
+    "devDependencies": {
+        "@perspective-dev/esbuild-plugin": "workspace:^",
+        "superstore-arrow": "catalog:",
+        "typescript": "catalog:",
+        "typedoc": "catalog:",
+        "zx": "catalog:"
+    }
+}

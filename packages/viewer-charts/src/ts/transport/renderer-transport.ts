@@ -1,0 +1,971 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+import type { Client, View, ViewConfig } from "@perspective-dev/client";
+import type { FacetConfig, PluginConfig } from "../charts/chart.ts";
+import type {
+    ControlMsg,
+    ErrorMsg,
+    InitMsg,
+    InteractionEvent,
+    LoadAndRenderMsg,
+    WorkerEnvelope,
+    WorkerMsg,
+} from "./protocol.ts";
+import {
+    PerspectiveSelectDetail,
+    type PerspectiveClickDetail,
+} from "../event-detail.ts";
+import { snapshotThemeVars } from "../theme/theme-snapshot.ts";
+import { snapshotFontFaces } from "../utils/font-snapshot.ts";
+import { TILE_SOURCES } from "../map/tile-source.ts";
+import { DomHostSink } from "../interaction/host-sink-dom.ts";
+
+// @ts-ignore — resolved at build time by `@perspective-dev/esbuild-plugin/worker`
+import getWorkerURL from "../worker/renderer.worker.ts";
+
+/**
+ * Module-level shared `Worker` for every `RendererTransport` running
+ * in worker mode. One worker process hosts one `WorkerRenderer` per
+ * active `sessionId` — N chart instances share startup costs (wasm
+ * `initSync`, font loads, JS module parse) instead of paying them N
+ * times.
+ *
+ * Lazy: created on first `transport.init()` in worker mode. Lives
+ * until page teardown — no refcount, no termination logic. Pages
+ * with no charts never spawn one. Per-session memory still scales
+ * with N (each session retains its own WebGL context, buffer pool,
+ * chart impl, view, client); the browser's ~16-context-per-worker
+ * cap is the new ceiling on simultaneous worker-mode charts.
+ */
+let SHARED_WORKER: Promise<Worker> | null = null;
+
+/**
+ * Per-session message handlers, keyed by the host-allocated
+ * `sessionId`. The shared worker's response listener demultiplexes
+ * incoming envelopes into here.
+ */
+const HOST_LISTENERS = new Map<number, (msg: WorkerMsg) => void>();
+
+let NEXT_SESSION_ID = 0;
+
+async function getSharedWorker(): Promise<Worker> {
+    if (SHARED_WORKER) {
+        return SHARED_WORKER;
+    }
+
+    SHARED_WORKER = (async () => {
+        const url = await getWorkerURL();
+        const w = new Worker(url, { type: "module", name: "viewer-charts" });
+        w.addEventListener("message", (e: MessageEvent) => {
+            const env = e.data as WorkerEnvelope;
+            HOST_LISTENERS.get(env.sessionId)?.(env.msg);
+        });
+
+        let poisoned = false;
+        w.addEventListener("error", (event: ErrorEvent) => {
+            if (poisoned) {
+                return;
+            }
+
+            poisoned = true;
+            SHARED_WORKER = null;
+            const detail = event.message || `failed to load ${url}`;
+            const message = `perspective-viewer-charts renderer worker error: ${detail}`;
+            console.error(message, event.error ?? "");
+            const errorMsg: ErrorMsg = { kind: "error", message };
+            for (const listener of HOST_LISTENERS.values()) {
+                listener(errorMsg);
+            }
+        });
+
+        return w;
+    })();
+
+    return SHARED_WORKER;
+}
+
+interface RendererHandle {
+    post(msg: any, transfer: Transferable[]): void;
+    addMessageListener(cb: (msg: any) => void): void;
+    terminate(): void;
+}
+
+type PendingRenderType =
+    | "saveZoom"
+    | "loadAndRender"
+    | "snapshotPng"
+    | "resize";
+interface PendingRenderRequest {
+    kind: PendingRenderType;
+    resolve: (v: any) => void;
+    reject: (e: Error) => void;
+}
+
+/**
+ * Host-side driver for one chart's `WorkerRenderer` session in the shared renderer `Worker`.
+ */
+export class RendererTransport {
+    private _handle: RendererHandle | null = null;
+
+    /**
+     * Set by {@link destroy}. Requests allocated after teardown settle
+     * immediately in `_allocPending` — `_post` is already a no-op once
+     * `_handle` is null, so a late request would otherwise never
+     * receive its reply and pend forever.
+     */
+    private _destroyed = false;
+    private _proxyChannel: MessageChannel | null = null;
+    private _proxySession: any = null;
+    private _client: Client;
+    private _view: View;
+    private _tableName: string | undefined;
+    /** Source panel `slot`, tagged onto dispatched interaction events so the
+     * host can route them (master/detail, global filter) to the right panel. */
+    private _panel: string | undefined;
+    private _clientWorkerURL: URL;
+    private _clientWasm: WebAssembly.Module;
+    private _chartTag: string;
+    private _maxCells: number;
+    private _precompileShaders: boolean;
+    private _ready: Promise<void>;
+    private _resolveReady!: () => void;
+    private _rejectReady!: (err: Error) => void;
+
+    /**
+     * Pending request/reply promises across all worker round-trips —
+     * `saveZoom`, `uploadChunk` ACKs, and `snapshotPng`. Each entry
+     * carries its `kind` so `destroy()` can apply per-kind teardown
+     * semantics (uploadChunk resolves silently, the rest reject with
+     * a teardown error).
+     *
+     * Keyed by a single monotonic counter; the worker's reply messages
+     * carry that id back verbatim. One counter for all kinds is safe
+     * because the host's switch already keys on `msg.kind` before
+     * resolving.
+     */
+    private _pending = new Map<number, PendingRenderRequest>();
+
+    private _pendingCounter = 0;
+    private _onZoomChanged: ((isDefault: boolean) => void) | null = null;
+
+    private _onPluginConfigDelta:
+        | ((fields: Record<string, string | number | boolean>) => void)
+        | null = null;
+
+    /**
+     * Cached zoom-default flag pushed by the renderer after each zoom
+     * mutation. Surfaced sync via `allZoomsDefault()`; updates between
+     * calls are best-effort.
+     */
+    private _allZoomsDefault = true;
+    private _hostGlCanvas: HTMLCanvasElement | null = null;
+
+    /**
+     * Blit-mode only: the visible `.webgl-canvas`'s 2D context. The
+     * worker emits each completed GL frame as a `FrameBitmapMsg`; on
+     * receipt we `drawImage` the bitmap into this context and `close()`
+     * it to release the GPU surface. Null in direct mode (the visible
+     * canvas's drawing buffer is the worker's transferred GL canvas).
+     */
+    private _displayCtx: CanvasRenderingContext2D | null = null;
+
+    /**
+     * Present-hold state for the staged-present presize protocol
+     * ({@link presize}). While holding, inbound `frameBitmap`s are
+     * STAGED (latest wins) instead of blitted, so the on-screen frame
+     * — old dimensions in the old, unchanged box — stays put until the
+     * host invokes the present closure `presize` resolved to, in the
+     * same task as its layout commit. Entered only by `presize`;
+     * exited by the present closure, by `presize`'s rejection path, or
+     * by `destroy` — every settle path releases the hold or hands the
+     * caller the release.
+     */
+    /**
+     * The last `(cssWidth, cssHeight, dpr)` posted to the worker — at init
+     * or any resize — i.e. the dimensions the worker has already rendered
+     * (or has an in-flight render for). {@link resize} short-circuits when
+     * its measurement matches (±0.5px, the presize protocol's own
+     * threshold): reactive resizes fan in from several host paths per
+     * layout transition (the post-commit fan-out, activation nudges, the
+     * fresh-restore tail), and every worker resize is an unconditional
+     * full re-render.
+     */
+    private _lastPostedSize: {
+        cssWidth: number;
+        cssHeight: number;
+        dpr: number;
+    } | null = null;
+
+    private _holdPresent = false;
+
+    private _stagedFrame: ImageBitmap | null = null;
+
+    /**
+     * Host-side sink for tooltip + cursor side-effects. The chart
+     * inside the renderer calls into a `MessageHostSink` that posts
+     * `pinTooltip` / `dismissTooltip` / `setCursor` over the control
+     * channel; this sink applies them to the DOM. Initialized lazily
+     * on first signal so we don't pay for the parent-style lookup
+     * unless a user interacts.
+     */
+    private _hostSink: DomHostSink | null = null;
+
+    /**
+     * Last `insertConfig` accepted by a `userSelect { selected: true }`
+     * message. Used to populate `removeConfigs` on the next
+     * `selected: false` (unpin / drill-up / view-change) — mirrors
+     * datagrid's `model._last_insert_configs` so coordinated-filter
+     * consumers can roll back the previous select when a new one
+     * supplants it.
+     */
+    private _lastInsertConfig: Partial<ViewConfig> | undefined = undefined;
+
+    constructor(opts: {
+        client: Client;
+        view: View;
+        tableName?: string;
+        panel?: string;
+        clientWasm: WebAssembly.Module;
+        clientWorkerURL: URL;
+        chartTag: string;
+        maxCells: number;
+        precompileShaders?: boolean;
+        onZoomChanged?: (isDefault: boolean) => void;
+        onPluginConfigDelta?: (
+            fields: Record<string, string | number | boolean>,
+        ) => void;
+    }) {
+        this._client = opts.client;
+        this._view = opts.view;
+        this._tableName = opts.tableName;
+        this._panel = opts.panel;
+        this._clientWorkerURL = opts.clientWorkerURL;
+        this._clientWasm = opts.clientWasm;
+        this._chartTag = opts.chartTag;
+        this._maxCells = opts.maxCells;
+        this._precompileShaders = opts.precompileShaders ?? false;
+        this._onZoomChanged = opts.onZoomChanged ?? null;
+        this._onPluginConfigDelta = opts.onPluginConfigDelta ?? null;
+        this._ready = new Promise((resolve, reject) => {
+            this._resolveReady = resolve;
+            this._rejectReady = reject;
+        });
+    }
+
+    async init(opts: {
+        gl: HTMLCanvasElement;
+        gridlines: HTMLCanvasElement;
+        chrome: HTMLCanvasElement;
+        facetConfig: FacetConfig;
+        pluginConfig: PluginConfig;
+        columnsConfig?: Record<string, any>;
+        defaultChartType?: string;
+        renderBlitMode: "blit" | "direct";
+    }): Promise<void> {
+        this._hostGlCanvas = opts.gl;
+
+        // Bridge the worker's fresh `Client` (instantiated in
+        // `bootstrapWorker` from `clientWasm` + `clientWorkerURL`) back
+        // to the host's real `Client` via a `ProxySession` over a
+        // dedicated `MessageChannel`.
+        const proxyChannel = new MessageChannel();
+        this._proxyChannel = proxyChannel;
+        this._proxySession = (this._client as any).new_proxy_session(
+            (bytes: Uint8Array) => {
+                const buf = bytes.slice().buffer;
+                proxyChannel.port1.postMessage(buf, [buf]);
+            },
+        );
+
+        proxyChannel.port1.addEventListener("message", (e: MessageEvent) => {
+            this._proxySession.handle_request(new Uint8Array(e.data));
+        });
+
+        proxyChannel.port1.start();
+
+        // Blit mode keeps the visible `.webgl-canvas` main-thread with
+        // a 2D context — the renderer paints into its own internal
+        // `OffscreenCanvas` and ships each completed frame back as an
+        // `ImageBitmap`. Direct mode transfers the visible canvas's
+        // drawing buffer to the renderer so GL paints straight to
+        // screen.
+        // Blit mode also keeps the gridlines/chrome layers worker-side:
+        // a transferred canvas presents on the compositor's schedule,
+        // unsynchronized with the host's layout commits, so it can't
+        // participate in the staged-present hold. The renderer
+        // composites both layers into the shipped frame instead, and
+        // the host-side placeholder canvases stay untouched
+        // (transparent). Direct mode transfers all three surfaces.
+        let glOC: OffscreenCanvas | undefined;
+        let gridlinesOC: OffscreenCanvas | undefined;
+        let chromeOC: OffscreenCanvas | undefined;
+        if (opts.renderBlitMode === "blit") {
+            this._displayCtx = opts.gl.getContext("2d");
+        } else {
+            glOC = opts.gl.transferControlToOffscreen();
+            gridlinesOC = opts.gridlines.transferControlToOffscreen();
+            chromeOC = opts.chrome.transferControlToOffscreen();
+        }
+
+        const rect = opts.gl.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const themeVars = snapshotThemeVars(opts.gl);
+
+        // Forward `@font-face` rules so the worker's separate
+        // `FontFaceSet` can resolve `ctx.font` family names.
+        const fontFaces = snapshotFontFaces();
+        const initMsg: InitMsg = {
+            kind: "init",
+            renderMode: opts.renderBlitMode,
+            glCanvas: glOC,
+            gridlinesCanvas: gridlinesOC,
+            chromeCanvas: chromeOC,
+            proxyPort: proxyChannel.port2,
+            clientWorkerURL: this._clientWorkerURL,
+            clientWasm: this._clientWasm,
+            chartTag: this._chartTag,
+            viewName: this._view.__unsafe_get_name(),
+            tableName: this._tableName,
+            facetConfig: opts.facetConfig,
+            pluginConfig: opts.pluginConfig,
+            columnsConfig: opts.columnsConfig,
+            defaultChartType: opts.defaultChartType,
+            tileSource: TILE_SOURCES.specFor(
+                opts.pluginConfig.map_tile_provider,
+            ),
+            themeVars,
+            fontFaces,
+            cssWidth: rect.width,
+            cssHeight: rect.height,
+            dpr,
+            bufferMaxCapacity: 0,
+            precompileShaders: this._precompileShaders,
+        };
+
+        this._lastPostedSize = {
+            cssWidth: rect.width,
+            cssHeight: rect.height,
+            dpr,
+        };
+        this._handle = await this._createHandle();
+        this._handle.addMessageListener((msg) =>
+            this._handleRendererMsg(msg as WorkerMsg),
+        );
+
+        // The bootstrap is triggered by posting the init message into
+        // the worker's session host. All three canvases are omitted in
+        // blit mode (the renderer allocates its own offscreens and
+        // ships composited frames) — only include the transferred
+        // surfaces present on this mode's init message.
+        const transfer: Transferable[] = [proxyChannel.port2];
+        if (chromeOC) {
+            transfer.unshift(chromeOC);
+        }
+
+        if (gridlinesOC) {
+            transfer.unshift(gridlinesOC);
+        }
+
+        if (glOC) {
+            transfer.unshift(glOC);
+        }
+
+        this._handle.post(initMsg, transfer);
+        await this._ready;
+    }
+
+    /**
+     * Opens a session on the module-shared renderer `Worker`.
+     */
+    private async _createHandle(): Promise<RendererHandle> {
+        const w = await getSharedWorker();
+        const sessionId = ++NEXT_SESSION_ID;
+        return {
+            post: (msg, transfer) =>
+                w.postMessage({ sessionId, msg }, transfer),
+            addMessageListener: (cb) => {
+                HOST_LISTENERS.set(sessionId, cb);
+            },
+            terminate: () => {
+                HOST_LISTENERS.delete(sessionId);
+                // Don't terminate the underlying worker — other
+                // sessions may still be live. Worker-side
+                // `WorkerRenderer` cleanup is driven by the
+                // `destroy` ControlMsg posted by the transport
+                // before reaching here.
+            },
+        };
+    }
+
+    setView(view: View): void {
+        this._view = view;
+        this._post({
+            kind: "setViewByName",
+            name: this._view.__unsafe_get_name(),
+        });
+    }
+
+    setColumnsConfig(cfg: Record<string, any>): void {
+        this._post({ kind: "setColumnsConfig", cfg });
+    }
+
+    setPluginConfig(cfg: PluginConfig): void {
+        this._post({
+            kind: "setPluginConfig",
+            cfg,
+            tileSource: TILE_SOURCES.specFor(cfg.map_tile_provider),
+        });
+    }
+
+    setBufferMaxCapacity(n: number): void {
+        this._post({ kind: "setBufferMaxCapacity", n });
+    }
+
+    /**
+     * Trigger a worker-side data fetch + render cycle. The worker
+     * resolves all schema / row-count metadata against its own `View`
+     * and `Table`, runs `view.with_typed_arrays`, and pipes the
+     * resulting `ColumnDataMap` directly into `chartImpl.uploadAndRender`
+     * — no host-side `Client`/`Table`/`View` await, no `postMessage` of
+     * column buffers.
+     *
+     * The returned promise resolves when the worker replies with
+     * `loadAndRenderAck`. Per the worker's "resolve on stale"
+     * contract, a mid-flight cancellation (a newer `loadAndRender`
+     * superseding this one) still acks — the host's awaiter just
+     * resolves quietly. Calls issued after `destroy()` resolve
+     * immediately (see `_allocPending`).
+     */
+    loadAndRender(opts: {
+        viewerConfig: {
+            group_by: string[];
+            split_by: string[];
+            columns: (string | null)[];
+        };
+        options?: { float32?: boolean };
+    }): Promise<void> {
+        const { id, promise } = this._allocPending<void>("loadAndRender");
+        const msg: LoadAndRenderMsg = {
+            kind: "loadAndRender",
+            msgId: id,
+            viewerConfig: opts.viewerConfig,
+            options: { float32: opts.options?.float32 ?? true },
+        };
+
+        this._post(msg);
+        return promise;
+    }
+
+    redraw(): void {
+        this._post({ kind: "redraw" });
+    }
+
+    /**
+     * Silently clear the worker chart's selection state (pinned tooltip) —
+     * no selection events are emitted; the worker echoes `dismissTooltip`
+     * to drop the host-side pinned artifact. See `DeselectMsg`.
+     */
+    deselect(): void {
+        this._post({ kind: "deselect" });
+    }
+
+    /**
+     * Resize the chart to the GL canvas's CURRENT CSS box and resolve
+     * once the resized frame has PRESENTED (the worker's `resizeAck`) —
+     * not at message-post, which would let callers proceed while the
+     * old-dimensions bitmap is still on screen. Reactive geometry
+     * changes only; anticipated ones go through {@link presize}.
+     *
+     * A measurement matching {@link _lastPostedSize} resolves immediately
+     * WITHOUT a worker round trip: the worker has already rendered (or is
+     * presenting) that exact frame, and re-posting would be a full
+     * re-render of an identical bitmap.
+     */
+    resize(): Promise<void> {
+        if (!this._hostGlCanvas) {
+            return Promise.resolve();
+        }
+
+        const rect = this._hostGlCanvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const last = this._lastPostedSize;
+        if (
+            last &&
+            Math.abs(last.cssWidth - rect.width) <= 0.5 &&
+            Math.abs(last.cssHeight - rect.height) <= 0.5 &&
+            last.dpr === dpr
+        ) {
+            return Promise.resolve();
+        }
+
+        return this._postResize(rect.width, rect.height);
+    }
+
+    /**
+     * Staged-present variant of {@link resize}: render at the given
+     * TARGET canvas CSS box (no measurement — the caller supplies the
+     * box the pending layout commit will produce), HOLDING the
+     * resulting frame (and any others that arrive meanwhile) offscreen
+     * instead of blitting, so nothing on screen changes. Resolves,
+     * once the resized frame is staged, to a present closure: calling
+     * it blits the latest staged frame and exits the hold — the host
+     * runs it in the same task as its layout commit so geometry and
+     * pixels land in one paint. On rejection (teardown) the hold is
+     * released here, so every settle path either frees the display or
+     * hands the caller the release.
+     */
+    presize(cssWidth: number, cssHeight: number): Promise<(() => void) | void> {
+        if (!this._hostGlCanvas) {
+            return Promise.resolve();
+        }
+
+        const dpr = window.devicePixelRatio || 1;
+        const last = this._lastPostedSize;
+        if (
+            last &&
+            Math.abs(last.cssWidth - cssWidth) <= 0.5 &&
+            Math.abs(last.cssHeight - cssHeight) <= 0.5 &&
+            last.dpr === dpr
+        ) {
+            return Promise.resolve();
+        }
+
+        this._holdPresent = true;
+        return this._postResize(cssWidth, cssHeight).then(
+            () => () => this._presentStaged(),
+            (err) => {
+                this._presentStaged();
+                throw err;
+            },
+        );
+    }
+
+    private _postResize(cssWidth: number, cssHeight: number): Promise<void> {
+        const dpr = window.devicePixelRatio || 1;
+        const { id, promise } = this._allocPending<void>("resize");
+        this._lastPostedSize = { cssWidth, cssHeight, dpr };
+        this._post({
+            kind: "resize",
+            msgId: id,
+            cssWidth,
+            cssHeight,
+            dpr,
+        });
+        return promise;
+    }
+
+    private _presentStaged(): void {
+        this._holdPresent = false;
+        const staged = this._stagedFrame;
+        this._stagedFrame = null;
+        if (staged) {
+            this._drawFrameBitmap(staged);
+        }
+    }
+
+    clear() {
+        this._post({ kind: "clear" });
+    }
+
+    invalidateTheme() {
+        if (!this._hostGlCanvas) {
+            return;
+        }
+
+        const themeVars = snapshotThemeVars(this._hostGlCanvas);
+        this._post({ kind: "invalidateTheme", themeVars });
+    }
+
+    async saveZoom() {
+        const { id } = this._allocPending<any>("saveZoom");
+        this._post({ kind: "saveZoom", requestId: id });
+    }
+
+    /**
+     * Allocate a pending request slot of the given `kind`. Returns the
+     * id (encoded into the outgoing `ControlMsg`) and a promise that
+     * resolves / rejects when the matching reply arrives or
+     * `destroy()` drains the table. Requests issued *after* `destroy()`
+     * settle immediately with the same per-kind semantics as the drain.
+     */
+    private _allocPending<T>(kind: PendingRenderType): {
+        id: number;
+        promise: Promise<T>;
+    } {
+        // A request issued after `destroy()` would never settle: `_post`
+        // no-ops with no handle, so no reply ever lands — and the host
+        // awaits `loadAndRender` while holding its per-renderer draw
+        // lock, so a pending-forever promise wedges that panel's lock
+        // permanently. (Reachable when an external DOM disconnect
+        // `delete()`s the element mid-draw; the host's own teardown
+        // paths are serialized behind the same lock.) Mirror the
+        // `destroy()` drain: `loadAndRender` resolves silently,
+        // reply-bearing kinds reject. The pre-attached no-op `catch`
+        // marks the rejection handled for fire-and-forget callers
+        // (`saveZoom`) without affecting real awaiters.
+        if (this._destroyed) {
+            if (kind === "loadAndRender") {
+                return {
+                    id: -1,
+                    promise: Promise.resolve(undefined as unknown as T),
+                };
+            }
+
+            const promise = Promise.reject<T>(
+                new Error("RendererTransport destroyed"),
+            );
+            promise.catch(() => {});
+            return { id: -1, promise };
+        }
+
+        const id = ++this._pendingCounter;
+        const promise = new Promise<T>((resolve, reject) => {
+            this._pending.set(id, { kind, resolve, reject });
+        });
+
+        return { id, promise };
+    }
+
+    restoreZoom(state: any): void {
+        this._post({ kind: "restoreZoom", state });
+    }
+
+    allZoomsDefault(): boolean {
+        return this._allZoomsDefault;
+    }
+
+    resetAllZooms(): void {
+        this._post({ kind: "resetAllZooms" });
+    }
+
+    resetExpandedDomain(): void {
+        this._post({ kind: "resetExpandedDomain" });
+    }
+
+    /**
+     * Request a PNG snapshot of the current frame. The worker flushes a
+     * synchronous render across the GL + gridlines + chrome layers,
+     * composites them into a single `OffscreenCanvas`, fills the theme
+     * background, and replies with the `convertToBlob` result.
+     */
+    snapshotPng(): Promise<Blob> {
+        const { id, promise } = this._allocPending<Blob>("snapshotPng");
+        this._post({ kind: "snapshotPng", requestId: id });
+        return promise;
+    }
+
+    forwardInteraction(event: InteractionEvent): void {
+        this._post({ kind: "interaction", event });
+    }
+
+    destroy(): void {
+        this._destroyed = true;
+        this._post({ kind: "destroy" });
+        if (this._proxySession) {
+            this._proxySession.close().catch(() => {});
+        }
+
+        if (this._proxyChannel) {
+            this._proxyChannel.port1.close();
+            this._proxyChannel = null;
+        }
+
+        if (this._handle) {
+            this._handle.terminate();
+            this._handle = null;
+        }
+
+        this._hostSink?.dismiss();
+        this._hostSink = null;
+
+        // The host's `<canvas>` elements are torn down by the plugin
+        // element's `disconnectedCallback` after `destroy()` returns —
+        // null these refs now so any post-destroy code can't dereference
+        // them, and so the GPU-backed 2D context can release earlier.
+        this._hostGlCanvas = null;
+        this._displayCtx = null;
+        this._holdPresent = false;
+        this._stagedFrame?.close();
+        this._stagedFrame = null;
+
+        // Drain pending request promises with kind-aware semantics:
+        //  - `loadAndRender` resolves silently (the host's awaited draw
+        //    observes a clean "no more work" rather than a teardown
+        //    rejection it would otherwise have to suppress).
+        //  - `saveZoom` / `snapshotPng` reject so the upstream promise
+        //    chain doesn't hang. Any unanswered messages still in the
+        //    worker's queue are abandoned along with the renderer when
+        //    the `destroy` ControlMsg fires worker-side.
+        const teardownErr = new Error("RendererTransport destroyed");
+        for (const entry of this._pending.values()) {
+            if (entry.kind === "loadAndRender") {
+                entry.resolve(undefined);
+            } else {
+                entry.reject(teardownErr);
+            }
+        }
+
+        this._pending.clear();
+    }
+
+    private _post(msg: ControlMsg): void {
+        this._postRaw(msg, []);
+    }
+
+    private _postRaw(msg: ControlMsg, transfer: Transferable[]): void {
+        if (!this._handle) {
+            return;
+        }
+
+        this._handle.post(msg, transfer);
+    }
+
+    private _handleRendererMsg(msg: WorkerMsg): void {
+        switch (msg.kind) {
+            case "ready":
+                this._resolveReady();
+                break;
+            case "zoomChanged":
+                this._allZoomsDefault = msg.isDefault;
+                this._onZoomChanged?.(msg.isDefault);
+                break;
+            case "saveZoomReply":
+                this._resolvePending(msg.requestId, "saveZoom", msg.state);
+                break;
+            case "pinTooltip":
+                this._ensureHostSink()?.pin(
+                    msg.grid,
+                    msg.pos,
+                    msg.bounds,
+                    msg.style,
+                );
+                break;
+            case "dismissTooltip":
+                this._hostSink?.dismiss();
+                break;
+            case "setCursor":
+                this._ensureHostSink()?.setCursor(msg.cursor);
+                break;
+            case "pluginConfigDelta":
+                this._onPluginConfigDelta?.(msg.fields);
+                break;
+            case "userClick":
+                this._dispatchOnViewer(
+                    new CustomEvent<PerspectiveClickDetail>(
+                        "perspective-click",
+                        {
+                            bubbles: true,
+                            composed: true,
+                            // Tag with the source panel so a multi-panel host
+                            // can attribute the click to the right panel.
+                            detail: { ...msg.detail, panel: this._panel },
+                        },
+                    ),
+                );
+                break;
+            case "userSelect": {
+                const removeConfigs = this._lastInsertConfig
+                    ? [this._lastInsertConfig]
+                    : [];
+                const insertConfigs = msg.selected ? [msg.insertConfig] : [];
+                this._lastInsertConfig = msg.selected
+                    ? msg.insertConfig
+                    : undefined;
+                const detail = new PerspectiveSelectDetail(
+                    msg.selected,
+                    msg.row,
+                    msg.column_names,
+                    // `Partial<ViewConfig>` (what the chart emits) is
+                    // structurally a `ViewConfigUpdate` for the
+                    // `filter`-only patches we ship; the only
+                    // incompatible field (`group_by_depth: number |
+                    // null`) is never set by our emitters.
+                    removeConfigs as any,
+                    insertConfigs as any,
+                );
+                // Tag with the source panel so the host's master/detail +
+                // global-filter routing can identify the originating panel.
+                detail.panel = this._panel;
+                this._dispatchOnViewer(
+                    new CustomEvent<PerspectiveSelectDetail>(
+                        "perspective-global-filter",
+                        {
+                            bubbles: true,
+                            composed: true,
+                            detail,
+                        },
+                    ),
+                );
+                break;
+            }
+
+            case "frameBitmap":
+                if (this._holdPresent) {
+                    this._stagedFrame?.close();
+                    this._stagedFrame = msg.bitmap;
+                } else {
+                    this._drawFrameBitmap(msg.bitmap);
+                }
+
+                break;
+            case "error":
+                this._rejectReady(new Error(msg.message));
+                break;
+            case "loadAndRenderAck":
+                if (msg.error !== undefined) {
+                    this._rejectPending(
+                        msg.msgId,
+                        "loadAndRender",
+                        new Error(msg.error),
+                    );
+                } else {
+                    this._resolvePending(msg.msgId, "loadAndRender", undefined);
+                }
+
+                break;
+            case "resizeAck":
+                this._resolvePending(msg.msgId, "resize", undefined);
+                break;
+            case "snapshotPngReply":
+                if (msg.error !== undefined) {
+                    this._rejectPending(
+                        msg.requestId,
+                        "snapshotPng",
+                        new Error(msg.error),
+                    );
+                } else {
+                    this._resolvePending(
+                        msg.requestId,
+                        "snapshotPng",
+                        msg.blob,
+                    );
+                }
+
+                break;
+        }
+    }
+
+    /**
+     * Look up a pending request by id, verify the recorded kind
+     * matches the inbound reply, resolve, and remove. Mismatches are
+     * silently dropped — they would only fire if the worker echoed
+     * the wrong kind for a given id, which would itself be a bug
+     * worth catching at the worker side.
+     */
+    private _resolvePending(
+        id: number,
+        kind: PendingRenderType,
+        value: unknown,
+    ): void {
+        const entry = this._pending.get(id);
+        if (!entry || entry.kind !== kind) {
+            return;
+        }
+
+        this._pending.delete(id);
+        entry.resolve(value);
+    }
+
+    private _rejectPending(
+        id: number,
+        kind: PendingRenderType,
+        error: Error,
+    ): void {
+        const entry = this._pending.get(id);
+        if (!entry || entry.kind !== kind) {
+            return;
+        }
+
+        this._pending.delete(id);
+        entry.reject(error);
+    }
+
+    /**
+     * Blit-mode handler: draw a renderer-emitted frame into the
+     * visible 2D-context display canvas, then close the bitmap so its
+     * GPU-backed surface is released. Resizes the visible canvas's
+     * drawing buffer to the bitmap dimensions on first frame and
+     * after any worker-side resize — the host doesn't directly
+     * control GL canvas size in blit mode, so we follow whatever the
+     * renderer emits.
+     */
+    private _drawFrameBitmap(bitmap: ImageBitmap): void {
+        if (this._displayCtx && this._hostGlCanvas) {
+            const w = bitmap.width;
+            const h = bitmap.height;
+            if (this._hostGlCanvas.width !== w) {
+                this._hostGlCanvas.width = w;
+            }
+
+            if (this._hostGlCanvas.height !== h) {
+                this._hostGlCanvas.height = h;
+            }
+
+            this._displayCtx.globalCompositeOperation = "copy";
+            this._displayCtx.drawImage(bitmap, 0, 0);
+        }
+
+        bitmap.close();
+    }
+
+    /**
+     * Dispatch a `CustomEvent` on the `<perspective-viewer>` ancestor
+     * of this transport's GL canvas. Walks the parent chain so the
+     * event bubbles from the viewer (matching where datagrid
+     * dispatches its `perspective-click` / `perspective-global-filter`
+     * events). No-op when the canvas is detached or no viewer ancestor
+     * exists (test harnesses, snapshot mode).
+     */
+    private _dispatchOnViewer(ev: CustomEvent): void {
+        if (!this._hostGlCanvas) {
+            return;
+        }
+
+        let node: Node | null = this._hostGlCanvas;
+        while (node) {
+            if (
+                node instanceof HTMLElement &&
+                node.tagName === "PERSPECTIVE-VIEWER"
+            ) {
+                node.dispatchEvent(ev);
+                return;
+            }
+
+            // Cross shadow-root boundaries — `parentNode` returns `null`
+            // at a ShadowRoot, so use `host` when present.
+            node =
+                (node as ShadowRoot).host ??
+                (node as Element).parentNode ??
+                null;
+        }
+    }
+
+    /**
+     * Lazily construct a `DomHostSink` rooted at the host GL canvas
+     * (cursor mutations) and its parent (pinned-tooltip `<div>`).
+     * Returns `null` if the canvas has been detached.
+     */
+    private _ensureHostSink(): DomHostSink | null {
+        if (this._hostSink) {
+            return this._hostSink;
+        }
+
+        const parent = this._hostGlCanvas?.parentElement;
+        if (!parent || !this._hostGlCanvas) {
+            return null;
+        }
+
+        this._hostSink = new DomHostSink(this._hostGlCanvas, parent);
+        return this._hostSink;
+    }
+}

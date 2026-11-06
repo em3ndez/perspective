@@ -1,0 +1,945 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+use std::collections::HashMap;
+use std::fmt::Display;
+
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+use crate::assert_table_api;
+use crate::client::{Client, Features};
+use crate::config::{Expressions, ViewConfigUpdate};
+use crate::proto::make_table_req::MakeTableOptions;
+use crate::proto::make_table_req::make_table_options::MakeTableType;
+use crate::proto::request::ClientReq;
+use crate::proto::response::ClientResp;
+use crate::proto::*;
+use crate::table_data::UpdateData;
+use crate::utils::*;
+use crate::view::{View, ViewSource};
+
+pub type Schema = HashMap<String, ColumnType>;
+
+/// The format to interpret data preovided to [`Client::table`].
+///
+/// When serialized, these values are `"csv"`, `"json"`, `"columns"`, `"arrow"`
+/// and `"ndjson"`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
+pub enum TableReadFormat {
+    #[serde(rename = "csv")]
+    Csv,
+
+    #[serde(rename = "json")]
+    JsonString,
+
+    #[serde(rename = "columns")]
+    ColumnsString,
+
+    #[serde(rename = "arrow")]
+    Arrow,
+
+    #[serde(rename = "ndjson")]
+    Ndjson,
+}
+
+impl TableReadFormat {
+    pub fn parse(value: Option<String>) -> Result<Option<Self>, String> {
+        Ok(match value.as_deref() {
+            Some("csv") => Some(TableReadFormat::Csv),
+            Some("json") => Some(TableReadFormat::JsonString),
+            Some("columns") => Some(TableReadFormat::ColumnsString),
+            Some("arrow") => Some(TableReadFormat::Arrow),
+            Some("ndjson") => Some(TableReadFormat::Ndjson),
+            None => None,
+            Some(x) => return Err(format!("Unknown format \"{x}\"")),
+        })
+    }
+}
+
+/// The column, or columns in key order, a [`Table`] is keyed by.
+///
+/// When serialized, a single column is a `string` and a composite key is an
+/// array of `string`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub enum TableIndex {
+    Column(String),
+    Columns(Vec<String>),
+}
+
+impl TableIndex {
+    /// The index columns in key order.
+    pub fn columns(&self) -> &[String] {
+        match self {
+            TableIndex::Column(column) => std::slice::from_ref(column),
+            TableIndex::Columns(columns) => columns,
+        }
+    }
+
+    /// Fold a single-column list into [`TableIndex::Column`] and reject an
+    /// empty one.
+    pub fn normalize(self) -> ClientResult<Self> {
+        match self {
+            TableIndex::Columns(columns) if columns.is_empty() => Err(ClientError::BadTableOptions),
+            TableIndex::Columns(mut columns) if columns.len() == 1 => {
+                Ok(TableIndex::Column(columns.remove(0)))
+            },
+            index => Ok(index),
+        }
+    }
+
+    /// The normalized index for a list of columns, `None` when empty.
+    pub fn from_columns(mut columns: Vec<String>) -> Option<Self> {
+        match columns.len() {
+            0 => None,
+            1 => Some(TableIndex::Column(columns.remove(0))),
+            _ => Some(TableIndex::Columns(columns)),
+        }
+    }
+}
+
+impl From<&str> for TableIndex {
+    fn from(value: &str) -> Self {
+        TableIndex::Column(value.to_string())
+    }
+}
+
+impl From<String> for TableIndex {
+    fn from(value: String) -> Self {
+        TableIndex::Column(value)
+    }
+}
+
+impl From<Vec<String>> for TableIndex {
+    fn from(value: Vec<String>) -> Self {
+        TableIndex::Columns(value)
+    }
+}
+
+/// Options which impact the behavior of [`Client::table`], as well as
+/// subsequent calls to [`Table::update`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+pub struct TableInitOptions {
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+
+    #[serde(default)]
+    #[ts(optional)]
+    pub format: Option<TableReadFormat>,
+
+    /// This [`Table`] should use the column, or columns, named by the `index`
+    /// parameter as the `index`, which causes [`Table::update`] and
+    /// [`Client::table`] input to either insert or update existing rows based
+    /// on `index` column value equality. A list of columns keys rows by the
+    /// combination of their values, in list order.
+    #[serde(default)]
+    #[ts(optional)]
+    pub index: Option<TableIndex>,
+
+    /// This [`Table`] should be limited to `limit` rows, after which the
+    /// _earliest_ rows will be overwritten (where _earliest_ is defined as
+    /// relative to insertion order).
+    #[serde(default)]
+    #[ts(optional)]
+    pub limit: Option<u32>,
+
+    /// Back this [`Table`]'s canonical data with the on-disk storage backend
+    /// instead of memory. On native targets this is a memory-mapped file; on
+    /// WASM it is OPFS (Worker only). Defaults to in-memory.
+    #[serde(default)]
+    #[ts(optional)]
+    pub page_to_disk: Option<bool>,
+
+    /// How Arrow `LIST` and JSON `Array` columns are ingested. `zip` (the
+    /// default) and `cartesian` expand a row into one row per list element,
+    /// and are incompatible with `index`, as the rows of an expansion
+    /// repeat their index. `stringify` encodes each list as a JSON array in
+    /// a single string column instead, with datetimes as epoch milliseconds,
+    /// and `stringify_formatted` writes them as the text `to_json` emits
+    /// under `formatted`. `STRUCT` and `MAP` columns are governed by
+    /// `struct_flatten` and `map_flatten`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub list_flatten: Option<crate::proto::ListFlatten>,
+
+    /// How Arrow `STRUCT` columns and JSON objects are ingested. `pivot` (the
+    /// default) hoists each field into its own dotted column, and `stringify`
+    /// keeps the whole value as JSON text in a single string column, with
+    /// datetimes as epoch milliseconds; `stringify_formatted` writes them as
+    /// the text `to_json` emits under `formatted`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub struct_flatten: Option<crate::proto::StructFlatten>,
+
+    /// How Arrow `MAP` columns are ingested. `pivot` hoists each distinct key
+    /// into its own dotted column, and `stringify` or `stringify_formatted`
+    /// keeps the whole value as JSON text in a single string column, as for
+    /// `struct_flatten`. When unset, follows `struct_flatten`. JSON objects
+    /// always follow `struct_flatten`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub map_flatten: Option<crate::proto::MapFlatten>,
+
+    /// The columns of a [`Table`] made from a [`View`], in place of the ones
+    /// inferred from it.
+    #[serde(default)]
+    #[ts(optional)]
+    pub schema: Option<IndexMap<String, ColumnType>>,
+}
+
+impl TableInitOptions {
+    pub fn set_name<D: Display>(&mut self, name: D) {
+        self.name = Some(format!("{name}"))
+    }
+}
+
+impl TryFrom<TableOptions> for MakeTableOptions {
+    type Error = ClientError;
+
+    fn try_from(value: TableOptions) -> Result<Self, Self::Error> {
+        let page_to_disk = value.page_to_disk;
+        let list_flatten = value.list_flatten.map(|x| x as i32);
+        let struct_flatten = value.struct_flatten.map(|x| x as i32);
+        let map_flatten = value.map_flatten.map(|x| x as i32);
+        let view_schema = value.schema.clone().map(|schema| crate::proto::Schema {
+            schema: schema
+                .into_iter()
+                .map(|(name, r#type)| crate::proto::schema::KeyTypePair {
+                    name,
+                    r#type: r#type as i32,
+                })
+                .collect(),
+        });
+
+        Ok(MakeTableOptions {
+            page_to_disk,
+            list_flatten,
+            struct_flatten,
+            map_flatten,
+            view_schema,
+            make_table_type: match value {
+                TableOptions {
+                    index: Some(_),
+                    limit: Some(_),
+                    ..
+                } => Err(ClientError::BadTableOptions)?,
+                TableOptions {
+                    index: Some(TableIndex::Column(index)),
+                    ..
+                } => Some(MakeTableType::MakeIndexTable(index)),
+                TableOptions {
+                    index: Some(TableIndex::Columns(columns)),
+                    ..
+                } => Some(MakeTableType::MakeCompositeIndexTable(IndexColumns {
+                    columns,
+                })),
+                TableOptions {
+                    limit: Some(limit), ..
+                } => Some(MakeTableType::MakeLimitTable(limit)),
+                _ => None,
+            },
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TableOptions {
+    pub index: Option<TableIndex>,
+    pub limit: Option<u32>,
+    pub page_to_disk: Option<bool>,
+    pub list_flatten: Option<crate::proto::ListFlatten>,
+    pub struct_flatten: Option<crate::proto::StructFlatten>,
+    pub map_flatten: Option<crate::proto::MapFlatten>,
+    pub schema: Option<IndexMap<String, ColumnType>>,
+}
+
+/// The source [`View`] of a replica [`Table`] built by [`Client::table`],
+/// with the subscription tokens to release when the replica is deleted.
+#[derive(Clone)]
+pub(crate) struct ViewBinding {
+    pub view: View,
+    pub update_token: u32,
+    pub remove_token: Option<u32>,
+}
+
+impl From<TableInitOptions> for TableOptions {
+    fn from(value: TableInitOptions) -> Self {
+        TableOptions {
+            index: value.index,
+            limit: value.limit,
+            page_to_disk: value.page_to_disk,
+            list_flatten: value.list_flatten,
+            struct_flatten: value.struct_flatten,
+            map_flatten: value.map_flatten,
+            schema: value.schema,
+        }
+    }
+}
+
+/// Options for [`Client::join`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+pub struct JoinOptions {
+    #[serde(default)]
+    #[ts(optional)]
+    pub join_type: Option<crate::proto::JoinType>,
+
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+
+    #[serde(default)]
+    #[ts(optional)]
+    pub right_on: Option<String>,
+}
+
+/// Options for [`Table::delete`].
+#[derive(Clone, Debug, Default, Deserialize, TS)]
+pub struct DeleteOptions {
+    pub lazy: bool,
+}
+
+/// Options for [`Table::update`].
+#[derive(Clone, Debug, Default, Deserialize, Serialize, TS)]
+pub struct UpdateOptions {
+    pub port_id: Option<u32>,
+    pub format: Option<TableReadFormat>,
+}
+
+/// Result of a call to [`Table::validate_expressions`], containing a schema
+/// for valid expressions and error messages for invalid ones.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExprValidationResult {
+    pub expression_schema: Schema,
+    pub errors: HashMap<String, ExpressionError>,
+    pub expression_alias: HashMap<String, String>,
+}
+
+/// The successful result of [`Table::describe`]: what a [`View`] built from the
+/// described config would report, WITHOUT building one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Description {
+    /// The type of every expression, before aggregation.
+    pub expression_schema: Schema,
+
+    /// Equal to [`View::schema`] of a [`View`] built from the same config.
+    pub view_schema: Schema,
+}
+
+/// Why [`Table::describe`] rejected a config.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DescribeError {
+    /// At least one expression failed to compile.
+    Expressions {
+        expression_schema: Schema,
+        errors: HashMap<String, ExpressionError>,
+    },
+
+    /// Every expression compiled but the rest of the config is invalid.
+    Config(String),
+}
+
+impl Display for DescribeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Expressions { errors, .. } => {
+                let mut names = errors.keys().collect::<Vec<_>>();
+                names.sort();
+                write!(f, "Invalid expressions: ")?;
+                for (i, name) in names.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, "; ")?;
+                    }
+
+                    write!(f, "{}: {}", name, errors[*name].error_message)?;
+                }
+
+                Ok(())
+            },
+            Self::Config(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for DescribeError {}
+
+/// The wire/serde shape of a [`Table::describe`] verdict, as exchanged with
+/// JavaScript and Python (both client results and virtual-server handler
+/// returns): exactly one of the three arms, discriminated by its keys.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DescribeVerdict {
+    Ok {
+        expression_schema: Schema,
+        view_schema: Schema,
+    },
+    Expressions {
+        #[serde(default)]
+        expression_schema: Schema,
+        expression_errors: HashMap<String, ExpressionError>,
+    },
+    Config {
+        config_error: String,
+    },
+}
+
+impl From<Result<Description, DescribeError>> for DescribeVerdict {
+    fn from(value: Result<Description, DescribeError>) -> Self {
+        match value {
+            Ok(d) => Self::Ok {
+                expression_schema: d.expression_schema,
+                view_schema: d.view_schema,
+            },
+            Err(DescribeError::Expressions {
+                expression_schema,
+                errors,
+            }) => Self::Expressions {
+                expression_schema,
+                expression_errors: errors,
+            },
+            Err(DescribeError::Config(config_error)) => Self::Config { config_error },
+        }
+    }
+}
+
+impl TryFrom<DescribeVerdict> for Result<Description, DescribeError> {
+    type Error = ClientError;
+
+    /// Fails only for the unrepresentable `Expressions` arm with no errors.
+    fn try_from(value: DescribeVerdict) -> Result<Self, ClientError> {
+        Ok(match value {
+            DescribeVerdict::Ok {
+                expression_schema,
+                view_schema,
+            } => Ok(Description {
+                expression_schema,
+                view_schema,
+            }),
+            DescribeVerdict::Expressions {
+                expression_schema,
+                expression_errors,
+            } => {
+                if expression_errors.is_empty() {
+                    return Err(ClientError::Unknown(
+                        "Describe verdict has an empty `expression_errors`".to_string(),
+                    ));
+                }
+
+                Err(DescribeError::Expressions {
+                    expression_schema,
+                    errors: expression_errors,
+                })
+            },
+            DescribeVerdict::Config { config_error } => Err(DescribeError::Config(config_error)),
+        })
+    }
+}
+
+fn decode_schema(schema: HashMap<String, i32>) -> ClientResult<Schema> {
+    schema
+        .into_iter()
+        .map(|(name, ty)| {
+            ColumnType::try_from(ty)
+                .map(|ty| (name, ty))
+                .map_err(|e| ClientError::Unknown(e.to_string()))
+        })
+        .collect()
+}
+
+/// [`Table`] is Perspective's columnar data frame, analogous to a Pandas/Polars
+/// `DataFrame` or Apache Arrow, supporting append & in-place updates, removal
+/// by index, and update notifications.
+///
+/// A [`Table`] contains columns, each of which have a unique name, are strongly
+/// and consistently typed, and contains rows of data conforming to the column's
+/// type. Each column in a [`Table`] must have the same number of rows, though
+/// not every row must contain data; null-values are used to indicate missing
+/// values in the dataset. The schema of a [`Table`] is _immutable after
+/// creation_, which means the column names and data types cannot be changed
+/// after the [`Table`] has been created. Columns cannot be added or deleted
+/// after creation either, but a [`View`] can be used to select an arbitrary set
+/// of columns from the [`Table`].
+#[derive(Clone)]
+pub struct Table {
+    name: String,
+    client: Client,
+    options: TableOptions,
+    pub(crate) view_binding: Option<ViewBinding>,
+}
+
+assert_table_api!(Table);
+
+impl PartialEq for Table {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.client == other.client
+    }
+}
+
+impl Table {
+    pub(crate) fn new(name: String, client: Client, options: TableOptions) -> Self {
+        Table {
+            name,
+            client,
+            options,
+            view_binding: None,
+        }
+    }
+
+    fn client_message(&self, req: ClientReq) -> Request {
+        Request {
+            msg_id: self.client.gen_id(),
+            entity_id: self.name.clone(),
+            client_req: Some(req),
+        }
+    }
+
+    /// Get a copy of the [`Client`] this [`Table`] came from.
+    pub fn get_client(&self) -> Client {
+        self.client.clone()
+    }
+
+    /// Get a metadata dictionary of the `perspective_server::Server`'s
+    /// features, which is (currently) implementation specific, but there is
+    /// only one implementation.
+    pub async fn get_features(&self) -> ClientResult<Features> {
+        self.client.get_features().await
+    }
+
+    /// Returns the name of the index column for the table.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use perspective_client::{Client, TableData, TableInitOptions, UpdateData};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client: Client = todo!();
+    /// let options = TableInitOptions {
+    ///     index: Some("x".into()),
+    ///     ..TableInitOptions::default()
+    /// };
+    /// let data = TableData::Update(UpdateData::Csv("x,y\n1,2\n3,4".into()));
+    /// let table = client.table(data, options).await?;
+    /// let index = table.get_index();
+    /// # Ok(()) }
+    /// ```
+    pub fn get_index(&self) -> Option<TableIndex> {
+        self.options.index.clone()
+    }
+
+    /// Returns the user-specified row limit for this table.
+    pub fn get_limit(&self) -> Option<u32> {
+        self.options.limit.as_ref().map(|limit| *limit)
+    }
+
+    /// Returns the user-specified name for this table, or the auto-generated
+    /// name if a name was not specified when the table was created.
+    pub fn get_name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    /// Removes all the rows in the [`Table`], but preserves everything else
+    /// including the schema, index, and any callbacks or registered
+    /// [`View`] instances.
+    ///
+    /// Calling [`Table::clear`], like [`Table::update`] and [`Table::remove`],
+    /// will trigger an update event to any registered listeners via
+    /// [`View::on_update`].
+    pub async fn clear(&self) -> ClientResult<()> {
+        self.replace(UpdateData::JsonRows("[]".to_owned())).await
+    }
+
+    /// Delete this [`Table`] and cleans up associated resources.
+    ///
+    /// [`Table`]s do not stop consuming resources or processing updates when
+    /// they are garbage collected in their host language - you must call
+    /// this method to reclaim these.
+    ///
+    /// # Arguments
+    ///
+    /// - `options` An options dictionary.
+    ///     - `lazy` Whether to delete this [`Table`] _lazily_. When false (the
+    ///       default), the delete will occur immediately, assuming it has no
+    ///       [`View`] instances registered to it (which must be deleted first,
+    ///       otherwise this method will throw an error). When true, the
+    ///       [`Table`] will only be marked for deltion once its [`View`]
+    ///       dependency count reaches 0.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use perspective_client::{Client, DeleteOptions, TableData, TableInitOptions, UpdateData};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client: Client = todo!();
+    /// let opts = TableInitOptions::default();
+    /// let data = TableData::Update(UpdateData::Csv("x,y\n1,2\n3,4".into()));
+    /// let table = client.table(data, opts).await?;
+    ///
+    /// // ...
+    ///
+    /// table.delete(DeleteOptions::default()).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn delete(&self, options: DeleteOptions) -> ClientResult<()> {
+        if let Some(binding) = &self.view_binding {
+            binding.view.remove_update(binding.update_token).await?;
+            if let Some(token) = binding.remove_token {
+                binding.view.remove_remove(token).await?;
+            }
+        }
+
+        let msg = self.client_message(ClientReq::TableDeleteReq(TableDeleteReq {
+            is_immediate: !options.lazy,
+        }));
+
+        match self.client.oneshot(&msg).await? {
+            ClientResp::TableDeleteResp(_) => Ok(()),
+            resp => Err(resp.into()),
+        }
+    }
+
+    /// Returns the column names of this [`Table`] in "natural" order (the
+    /// ordering implied by the input format).
+    ///  
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use perspective_client::Table;
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let table: Table = todo!();
+    /// let columns = table.columns().await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn columns(&self) -> ClientResult<Vec<String>> {
+        let msg = self.client_message(ClientReq::TableSchemaReq(TableSchemaReq {}));
+        match self.client.oneshot(&msg).await? {
+            ClientResp::TableSchemaResp(TableSchemaResp { schema }) => Ok(schema
+                .map(|x| x.schema.into_iter().map(|x| x.name.to_owned()).collect())
+                .unwrap()),
+            resp => Err(resp.into()),
+        }
+    }
+
+    /// Returns the number of rows in a [`Table`].
+    pub async fn size(&self) -> ClientResult<usize> {
+        let msg = self.client_message(ClientReq::TableSizeReq(TableSizeReq {}));
+        match self.client.oneshot(&msg).await? {
+            ClientResp::TableSizeResp(TableSizeResp { size }) => Ok(size as usize),
+            resp => Err(resp.into()),
+        }
+    }
+
+    /// Returns a table's [`Schema`], a mapping of column names to column types.
+    ///
+    /// The mapping of a [`Table`]'s column names to data types is referred to
+    /// as a [`Schema`]. Each column has a unique name and a data type, one
+    /// of:
+    ///
+    /// - `"boolean"` - A boolean type
+    /// - `"date"` - A timesonze-agnostic date type (month/day/year)
+    /// - `"datetime"` - A millisecond-precision datetime type in the UTC
+    ///   timezone
+    /// - `"float"` - A 64 bit float
+    /// - `"integer"` - A signed 32 bit integer (the integer type supported by
+    ///   JavaScript)
+    /// - `"string"` - A [`String`] data type (encoded internally as a
+    ///   _dictionary_)
+    ///
+    /// Note that all [`Table`] columns are _nullable_, regardless of the data
+    /// type.
+    pub async fn schema(&self) -> ClientResult<Schema> {
+        let msg = self.client_message(ClientReq::TableSchemaReq(TableSchemaReq {}));
+        match self.client.oneshot(&msg).await? {
+            ClientResp::TableSchemaResp(TableSchemaResp { schema }) => Ok(schema
+                .map(|x| {
+                    x.schema
+                        .into_iter()
+                        .map(|x| (x.name, ColumnType::try_from(x.r#type).unwrap()))
+                        .collect()
+                })
+                .unwrap()),
+            resp => Err(resp.into()),
+        }
+    }
+
+    /// Create a unique channel ID on this [`Table`], which allows
+    /// `View::on_update` callback calls to be associated with the
+    /// `Table::update` which caused them.
+    pub async fn make_port(&self) -> ClientResult<i32> {
+        let msg = self.client_message(ClientReq::TableMakePortReq(TableMakePortReq {}));
+        match self.client.oneshot(&msg).await? {
+            ClientResp::TableMakePortResp(TableMakePortResp { port_id }) => Ok(port_id as i32),
+            _ => Err(ClientError::Unknown("make_port".to_string())),
+        }
+    }
+
+    /// Register a callback which is called exactly once, when this [`Table`] is
+    /// deleted with the [`Table::delete`] method.
+    ///
+    /// [`Table::on_delete`] resolves when the subscription message is sent, not
+    /// when the _delete_ event occurs.
+    pub async fn on_delete(
+        &self,
+        on_delete: Box<dyn Fn() + Send + Sync + 'static>,
+    ) -> ClientResult<u32> {
+        let callback = move |resp: Response| match resp.client_resp {
+            Some(ClientResp::TableOnDeleteResp(_)) => {
+                on_delete();
+                Ok(())
+            },
+            resp => Err(resp.into()),
+        };
+
+        let msg = self.client_message(ClientReq::TableOnDeleteReq(TableOnDeleteReq {}));
+        self.client.subscribe_once(&msg, Box::new(callback)).await?;
+        Ok(msg.msg_id)
+    }
+
+    /// Removes a listener with a given ID, as returned by a previous call to
+    /// [`Table::on_delete`].
+    pub async fn remove_delete(&self, callback_id: u32) -> ClientResult<()> {
+        let msg = self.client_message(ClientReq::TableRemoveDeleteReq(TableRemoveDeleteReq {
+            id: callback_id,
+        }));
+
+        match self.client.oneshot(&msg).await? {
+            ClientResp::TableRemoveDeleteResp(_) => Ok(()),
+            resp => Err(resp.into()),
+        }
+    }
+
+    /// Removes rows from this [`Table`] with the `index` column values
+    /// supplied.
+    ///
+    /// # Arguments
+    ///
+    /// - `indices` - A list of `index` column values for rows that should be
+    ///   removed.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use perspective_client::{Table, UpdateData};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let table: Table = todo!();
+    /// table
+    ///     .remove(UpdateData::Csv("index\n1\n2\n3".into()))
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn remove(&self, input: UpdateData) -> ClientResult<()> {
+        let msg = self.client_message(ClientReq::TableRemoveReq(TableRemoveReq {
+            data: Some(input.into()),
+        }));
+
+        match self.client.oneshot(&msg).await? {
+            ClientResp::TableRemoveResp(_) => Ok(()),
+            resp => Err(resp.into()),
+        }
+    }
+
+    /// Replace all rows in this [`Table`] with the input data, coerced to this
+    /// [`Table`]'s existing [`Schema`], notifying any derived [`View`] and
+    /// [`View::on_update`] callbacks.
+    ///
+    /// Calling [`Table::replace`] is an easy way to replace _all_ the data in a
+    /// [`Table`] without losing any derived [`View`] instances or
+    /// [`View::on_update`] callbacks. [`Table::replace`] does _not_ infer
+    /// data types like [`Client::table`] does, rather it _coerces_ input
+    /// data to the `Schema` like [`Table::update`]. If you need a [`Table`]
+    /// with a different `Schema`, you must create a new one.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use perspective_client::{Table, UpdateData};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let table: Table = todo!();
+    /// let data = UpdateData::Csv("x,y\n1,2".into());
+    /// table.replace(data).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn replace(&self, input: UpdateData) -> ClientResult<()> {
+        let msg = self.client_message(ClientReq::TableReplaceReq(TableReplaceReq {
+            data: Some(input.into()),
+        }));
+
+        match self.client.oneshot(&msg).await? {
+            ClientResp::TableReplaceResp(_) => Ok(()),
+            resp => Err(resp.into()),
+        }
+    }
+
+    /// Updates the rows of this table and any derived [`View`] instances.
+    ///
+    /// Calling [`Table::update`] will trigger the [`View::on_update`] callbacks
+    /// register to derived [`View`], and the call itself will not resolve until
+    /// _all_ derived [`View`]'s are notified.
+    ///
+    /// When updating a [`Table`] with an `index`, [`Table::update`] supports
+    /// partial updates, by omitting columns from the update data.
+    ///
+    /// # Arguments
+    ///
+    /// - `input` - The input data for this [`Table`]. The schema of a [`Table`]
+    ///   is immutable after creation, so this method cannot be called with a
+    ///   schema.
+    /// - `options` - Options for this update step - see [`UpdateOptions`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use perspective_client::{Table, UpdateData, UpdateOptions};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let table: Table = todo!();
+    /// let data = UpdateData::Csv("x,y\n1,2".into());
+    /// let opts = UpdateOptions::default();
+    /// table.update(data, opts).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn update(&self, input: UpdateData, options: UpdateOptions) -> ClientResult<()> {
+        let msg = self.client_message(ClientReq::TableUpdateReq(TableUpdateReq {
+            data: Some(input.into()),
+            port_id: options.port_id.unwrap_or(0),
+        }));
+
+        match self.client.oneshot(&msg).await? {
+            ClientResp::TableUpdateResp(_) => Ok(()),
+            resp => Err(resp.into()),
+        }
+    }
+
+    /// Validate a complete [`ViewConfigUpdate`] against this table and report
+    /// the schema a [`View`] built from it would have, without creating one.
+    pub async fn describe(
+        &self,
+        config: ViewConfigUpdate,
+    ) -> ClientResult<Result<Description, DescribeError>> {
+        let msg = self.client_message(ClientReq::TableDescribeReq(TableDescribeReq {
+            config: Some(config.into()),
+        }));
+
+        let resp = match self.client.oneshot(&msg).await? {
+            ClientResp::TableDescribeResp(resp) => resp,
+            resp => return Err(resp.into()),
+        };
+
+        let expression_schema = decode_schema(resp.expression_schema)?;
+        let has_errors = !resp.expression_errors.is_empty();
+        Ok(match (resp.result, has_errors) {
+            (Some(table_describe_resp::Result::View(view)), false) => Ok(Description {
+                expression_schema,
+                view_schema: decode_schema(view.schema)?,
+            }),
+            (Some(table_describe_resp::Result::ConfigError(msg)), false) => {
+                Err(DescribeError::Config(msg))
+            },
+            (None, true) => Err(DescribeError::Expressions {
+                expression_schema,
+                errors: resp.expression_errors,
+            }),
+            (result, _) => {
+                return Err(ClientError::Unknown(format!(
+                    "Malformed describe response: result={:?} expression_errors={:?}",
+                    result.is_some(),
+                    resp.expression_errors.keys().collect::<Vec<_>>()
+                )));
+            },
+        })
+    }
+
+    /// Validates the given expressions.
+    pub async fn validate_expressions(
+        &self,
+        expressions: Expressions,
+    ) -> ClientResult<ExprValidationResult> {
+        let expression_alias = expressions.0.clone();
+        let config = ViewConfigUpdate {
+            expressions: Some(expressions),
+            columns: Some(vec![]),
+            ..ViewConfigUpdate::default()
+        };
+
+        match self.describe(config).await? {
+            Ok(d) => Ok(ExprValidationResult {
+                expression_schema: d.expression_schema,
+                errors: HashMap::new(),
+                expression_alias,
+            }),
+            Err(DescribeError::Expressions {
+                expression_schema,
+                errors,
+            }) => Ok(ExprValidationResult {
+                expression_schema,
+                errors,
+                expression_alias,
+            }),
+            Err(DescribeError::Config(msg)) => Err(ClientError::Internal(msg)),
+        }
+    }
+
+    /// Create a new [`View`] from this table with a specified
+    /// [`ViewConfigUpdate`].
+    ///
+    /// See [`View`] struct.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::collections::HashMap;
+    /// # use perspective_client::Table;
+    /// # use perspective_client::config::*;
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let table: Table = todo!();
+    /// let view = table
+    ///     .view(Some(ViewConfigUpdate {
+    ///         columns: Some(vec![Some("Sales".into())]),
+    ///         aggregates: Some(HashMap::from_iter(vec![("Sales".into(), "sum".into())])),
+    ///         group_by: Some(vec!["Region".into(), "Country".into()]),
+    ///         filter: Some(vec![Filter::new("Category", "in", &[
+    ///             "Furniture",
+    ///             "Technology",
+    ///         ])]),
+    ///         ..ViewConfigUpdate::default()
+    ///     }))
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn view(&self, config: Option<ViewConfigUpdate>) -> ClientResult<View> {
+        let view_name = randid();
+        let msg = Request {
+            msg_id: self.client.gen_id(),
+            entity_id: self.name.clone(),
+            client_req: ClientReq::TableMakeViewReq(TableMakeViewReq {
+                view_id: view_name.clone(),
+                config: config.map(|x| x.into()),
+            })
+            .into(),
+        };
+
+        match self.client.oneshot(&msg).await? {
+            ClientResp::TableMakeViewResp(TableMakeViewResp { view_id })
+                if view_id == view_name =>
+            {
+                Ok(View::new_with_source(
+                    view_name,
+                    self.client.clone(),
+                    ViewSource {
+                        options: self.options.clone(),
+                    },
+                ))
+            },
+            resp => Err(resp.into()),
+        }
+    }
+}

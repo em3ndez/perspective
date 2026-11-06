@@ -1,0 +1,68 @@
+/* ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+ * ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+ * ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+ * ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+ * ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+ * ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+ * ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+ * ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+ * ┃ This file is part of the Perspective library, distributed under the terms ┃
+ * ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+ * ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ */
+
+@import "./icons.css";
+@import "./intl.css";
+
+perspective-viewer,
+:where(perspective-viewer [theme]) {
+    --psp-button--font-size: 16px;
+    --psp-config-button--padding: 15px 8px 6px 8px;
+    --psp-column-selector--font-size: 16px;
+    --psp-column-type--width: 25px;
+    --psp-select--padding: 0px;
+    --psp-top-panel-row--display: inline-flex;
+    --psp-button--min-width: 33px;
+
+    font-family:
+        "ui-monospace", "SFMono-Regular", "SF Mono", "Menlo", "Consolas",
+        "Liberation Mono", monospace;
+    --psp-interface-monospace--font-family:
+        "ui-monospace", "SFMono-Regular", "SF Mono", "Menlo", "Consolas",
+        "Liberation Mono", monospace;
+
+    --psp-label--webgl-y1--content: "arrow_upward";
+    --psp-label--webgl-y2--content: "arrow_downward";
+
+    --psp-active--background: initial;
+    --psp-calendar--filter: initial;
+    --psp-charts--legend--color: initial;
+    --psp-charts--tooltip--background: initial;
+    --psp-charts--treemap--hover-highlight: initial;
+    --psp-charts--treemap--labels: initial;
+    --psp-code-editor--column--color: initial;
+    --psp-code-editor--comment--color: initial;
+    --psp-code-editor--literal--color: initial;
+    --psp-code-editor--operator--color: initial;
+    --psp-code-editor--symbol--color: initial;
+    --psp-expression--error--color: initial;
+    --psp-expression--function--color: initial;
+    --psp-expression--operator--color: initial;
+    --psp-input--filter: initial;
+    --psp-openlayers--attribution--filter: initial;
+    --psp-charts--series-11--color: initial;
+    --psp-charts--series-12--color: initial;
+    --psp-datagrid--series-11--color: initial;
+    --psp-datagrid--series-12--color: initial;
+    --psp-charts--map-tiles--url: initial;
+    --psp-column-type--boolean--color: initial;
+    --psp-column-type--date--color: initial;
+    --psp-column-type--float--color: initial;
+    --psp-column-type--string--color: initial;
+    --psp-datagrid--border-color: initial;
+    --psp-datagrid--hover--border-color: initial;
+    --psp-expression--psp-error--color: initial;
+    --psp-status-icon--connected--color: initial;
+    --psp-status-icon--initializing--color: initial;
+    --psp-status-icon--psp-error--color: initial;
+}

@@ -1,0 +1,19 @@
+{
+    "name": "@perspective-dev/metadata",
+    "version": "5.8.0",
+    "description": "Benchmark utility based on perspective",
+    "private": true,
+    "files": [
+        "src/**/*"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/perspective-dev/perspective.git",
+        "directory": "rust/metadata"
+    },
+    "scripts": {
+        "build": "node build.mjs"
+    },
+    "author": "",
+    "license": "Apache-2.0"
+}

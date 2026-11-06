@@ -1,15 +1,16 @@
-/******************************************************************************
- *
- * Copyright (c) 2017, the Perspective Authors.
- *
- * This file is part of the Perspective library, distributed under the terms of
- * the Apache License 2.0.  The full license can be found in the LICENSE file.
- *
- */
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-const PerspectivePlugin = require("@finos/perspective-webpack-plugin");
 const HtmlWebPackPlugin = require("html-webpack-plugin");
-const path = require("path");
 
 module.exports = {
     mode: process.env.NODE_ENV || "production",
@@ -21,14 +22,21 @@ module.exports = {
         new HtmlWebPackPlugin({
             title: "Perspective Webpack Example",
         }),
-        new PerspectivePlugin(),
     ],
     module: {
         rules: [
             {
                 test: /\.css$/,
                 exclude: /node_modules/,
-                use: [{loader: "style-loader"}, {loader: "css-loader"}],
+                use: [{ loader: "style-loader" }, { loader: "css-loader" }],
+            },
+            {
+                test: /(perspective\-server\.wasm|perspective\-viewer\.wasm)$/,
+                type: "asset/resource",
+            },
+            {
+                test: /\.arrow$/,
+                use: [{ loader: "arraybuffer-loader" }],
             },
         ],
     },
@@ -39,11 +47,9 @@ module.exports = {
         builtAt: false,
         entrypoints: false,
     },
-    devServer: {
-        contentBase: [
-            path.join(__dirname, "dist"),
-            path.join(__dirname, "../../node_modules/superstore-arrow"),
-        ],
+    experiments: {
+        asyncWebAssembly: false,
+        syncWebAssembly: false,
     },
     devtool: "source-map",
 };

@@ -1,0 +1,82 @@
+{
+    "name": "@perspective-dev/jupyterlab",
+    "version": "5.8.0",
+    "description": "JupyterLab file renderers for the Perspective library (CSV, JSON, Arrow). The PerspectiveWidget itself ships via the perspective-python wheel using anywidget.",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/perspective-dev/perspective.git",
+        "directory": "packages/jupyterlab"
+    },
+    "keywords": [
+        "perspective",
+        "datagrid",
+        "data-grid",
+        "pivot-table",
+        "pivot",
+        "charts",
+        "visualization",
+        "dashboard",
+        "analytics",
+        "bi",
+        "streaming",
+        "real-time",
+        "wasm",
+        "webassembly",
+        "arrow",
+        "jupyter",
+        "jupyterlab",
+        "jupyterlab-extension"
+    ],
+    "homepage": "https://perspective-dev.github.io",
+    "files": [
+        "dist/**/*",
+        "src/**/*"
+    ],
+    "type": "commonjs",
+    "main": "dist/esm/perspective-jupyterlab.js",
+    "style": "dist/css/perspective-jupyterlab.css",
+    "directories": {
+        "dist": "dist/"
+    },
+    "license": "Apache-2.0",
+    "publishConfig": {
+        "access": "public"
+    },
+    "scripts": {
+        "build": "node ./build.mjs",
+        "clean": "node ./clean.mjs",
+        "test:jupyter": "PSP_JUPYTERLAB_TESTS=1 __JUPYTERLAB_PORT__=6538 pnpm exec playwright test --config ../../tools/test/playwright.config.ts",
+        "test:jupyter:build": "node ./build.mjs"
+    },
+    "dependencies": {
+        "@perspective-dev/viewer-charts": "workspace:^",
+        "@perspective-dev/viewer-datagrid": "workspace:^",
+        "@perspective-dev/viewer": "workspace:^",
+        "@perspective-dev/client": "workspace:^",
+        "@perspective-dev/server": "workspace:^",
+        "@jupyterlab/application": ">2 <5",
+        "@lumino/widgets": "<3"
+    },
+    "devDependencies": {
+        "@perspective-dev/anywidget": "workspace:^",
+        "@perspective-dev/esbuild-plugin": "workspace:^",
+        "@perspective-dev/test": "workspace:^",
+        "@jupyterlab/builder": "^4",
+        "lightningcss": "catalog:"
+    },
+    "jupyterlab": {
+        "webpackConfig": "./webpack.config.js",
+        "extension": true,
+        "outputDir": "./dist/cjs",
+        "discovery": {
+            "server": {
+                "base": {
+                    "name": "perspective-python"
+                },
+                "managers": [
+                    "pip"
+                ]
+            }
+        }
+    }
+}

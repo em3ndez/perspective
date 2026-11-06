@@ -1,0 +1,86 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+import type { View, ViewConfig, Filter, Scalar } from "@perspective-dev/client";
+import type { CellConfigResult } from "./types.ts";
+import { isMetaColumn } from "./model/meta_columns.ts";
+
+interface ModelWithViewAndConfig {
+    _view: View;
+    _config: ViewConfig;
+}
+
+interface RowData {
+    __ROW_PATH__?: unknown[];
+    [key: string]: unknown;
+}
+
+/**
+ * The filter clause matching one pivot level's key.
+ */
+function key_filter(column: string, value: Scalar): Filter {
+    return value === null ? [column, "is null", null] : [column, "==", value];
+}
+
+export default async function getCellConfig(
+    { _view, _config }: ModelWithViewAndConfig,
+    row_idx: number,
+    col_idx: number | undefined,
+): Promise<CellConfigResult> {
+    const group_by = _config.group_by;
+    const split_by = _config.split_by;
+    const start_row = row_idx >= 0 ? row_idx : 0;
+    const end_row = start_row + 1;
+    const r = (await _view.to_json({ start_row, end_row })) as RowData[];
+    const row_paths = r.map((x) => x.__ROW_PATH__);
+    const group_by_values = (row_paths[0] || []) as Scalar[];
+
+    const row_filters = group_by_values.map((pivot_value, index) =>
+        key_filter(group_by[index], pivot_value),
+    );
+
+    // Filter out *all* meta columns before indexing into the row's
+    // keys — the DuckDB virtual server's JSON output now includes
+    // per-level `__ROW_PATH_<n>__` columns alongside the
+    // `__ROW_PATH__` sidecar, so the previous `+1` skip (which
+    // assumed exactly one leading meta column) lands on a meta key
+    // when group_by has multiple levels.
+    const user_keys = Object.keys(r[0]).filter((k) => !isMetaColumn(k));
+    const column_paths = col_idx === undefined ? undefined : user_keys[col_idx];
+    const result: CellConfigResult = {
+        row: r[0] as Record<string, unknown>,
+        column_names: [],
+        config: { filter: [] },
+    };
+
+    let column_filters: Filter[] = [];
+    if (column_paths && col_idx !== undefined) {
+        const area = (await _view.column_paths({
+            start_col: col_idx,
+            end_col: col_idx + 1,
+        })) as (Scalar | undefined)[][];
+
+        result.column_names = [String(area[area.length - 1]?.[0] ?? "")];
+        column_filters = split_by
+            .map((pivot, index): Filter | undefined => {
+                const pivot_value = area[index]?.[0];
+                return pivot_value === null || pivot_value === undefined
+                    ? undefined
+                    : [pivot, "==", pivot_value];
+            })
+            .filter((x): x is Filter => x !== undefined);
+    }
+
+    const filter = _config.filter.concat(row_filters).concat(column_filters);
+    result.config = { filter };
+    return result;
+}

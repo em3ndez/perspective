@@ -1,0 +1,208 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+import { execSync } from "child_process";
+import { build } from "@perspective-dev/esbuild-plugin/build.js";
+import { WorkerPlugin } from "@perspective-dev/esbuild-plugin/worker.js";
+import { NodeModulesExternal } from "@perspective-dev/esbuild-plugin/external.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import {
+    bundle as bundleCss,
+    composeVisitors,
+    bundleAsync as bundleAsyncCss,
+} from "lightningcss";
+import { compress } from "pro_self_extracting_wasm";
+import {
+    buildCustomElementsManifest,
+    buildDocsCorpus,
+    get_host,
+    inlineUrlVisitor,
+    resolveNPM,
+} from "./tools.mjs";
+
+const IS_DEBUG =
+    !!process.env.PSP_DEBUG || process.argv.indexOf("--debug") >= 0;
+
+const IS_FAST = !IS_DEBUG && !!process.env.PSP_FAST;
+
+const INHERIT = {
+    stdio: "inherit",
+    stderr: "inherit",
+};
+
+export async function build_all() {
+    if (!process.env.PSP_SKIP_WASM) {
+        const release_flag = IS_DEBUG ? "" : IS_FAST ? "--fast" : "--release";
+        execSync(
+            `cargo bundle --target=${get_host()} -- perspective_viewer ${release_flag}`,
+            {
+                ...INHERIT,
+                env: { ...process.env, PSP_ROOT_DIR: "../.." },
+            },
+        );
+
+        await compress(
+            "dist/wasm/perspective-viewer.wasm",
+            "dist/wasm/perspective-viewer.wasm",
+        );
+    }
+
+    // The agent metadata bundle: `search_docs` corpus + tool parameter
+    // schemas (needs the freshly-emitted `.d.ts` / ts-rs output).
+    const docs_stats = await buildDocsCorpus();
+    console.log(
+        `docs corpus: ${docs_stats.chunks} chunks / ${docs_stats.bytes} bytes from ${docs_stats.files} files`,
+    );
+
+    const cem_stats = await buildCustomElementsManifest();
+    console.log(
+        `custom-elements.json: ${cem_stats.members} members / ${cem_stats.events} events / ${cem_stats.cssProperties} css properties / ${cem_stats.exports} exports`,
+    );
+
+    // JavaScript
+    const BUILD = [
+        // No WASM assets inlined or linked.
+        // {
+        //     'Import via `<script type="module">`': true, // *****
+        //     "Requires WASM bootstrap": true,
+        //     "Load as binary": true,
+        //     "Bundler friendly": true,
+        // },
+        {
+            entryPoints: ["src/ts/perspective-viewer.ts"],
+            format: "esm",
+            minify: false,
+            minifySyntax: !process.env.PSP_DEBUG,
+            minifyIdentifiers: !process.env.PSP_DEBUG,
+            external: ["*.wasm", "@perspective-dev/client/registry"],
+            outdir: "dist/esm",
+            plugins: [
+                WorkerPlugin({
+                    inline: true,
+                    // plugins: [GlslMinify(), LightningCssMinify()],
+                    // loader: {
+                    //     ".css": "text",
+                    //     ".glsl": "text",
+                    // },
+                }),
+            ],
+        },
+        // Dependency-free leaf modules, published as the `./select-detail`
+        // and `./column-format` subpath exports. Plugin packages import these
+        // instead of the package root, which would link the entire viewer and
+        // its wasm asset into a plugin's standalone `dist/cdn` bundle.
+        {
+            entryPoints: ["src/ts/select-detail.ts", "src/ts/column-format.ts"],
+            format: "esm",
+            outdir: "dist/esm",
+        },
+        // WASM assets linked to relative path via `fetch()`. This efficiently
+        // loading build is great for `<script>` tags but will give many
+        // bundlers trouble.
+        // {
+        //     'Import via `<script type="module">`': true,
+        //     "Requires WASM bootstrap": false,
+        //     "Load as binary": true,
+        //     "Bundler friendly": false,
+        // },
+        {
+            entryPoints: ["src/ts/perspective-viewer.cdn.ts"],
+            format: "esm",
+            loader: { ".wasm": "file" },
+            outfile: "dist/cdn/perspective-viewer.js",
+            plugins: [
+                WorkerPlugin({
+                    inline: true,
+                    // plugins: [GlslMinify(), LightningCssMinify()],
+                    // loader: {
+                    //     ".css": "text",
+                    //     ".glsl": "text",
+                    // },
+                }),
+            ],
+        },
+    ];
+
+    await Promise.all(BUILD.map(build)).catch(() => process.exit(1));
+
+    // This is dumb.  `splitting` param for `esbuild` outputs a `__require`/
+    // `__exports`/`__esModule` polyfill and does not tree-shake it;  this <1kb
+    // file blocks downloading of the wasm asset until after alot of JavaScript has
+    // parsed due to this multi-step download+eval.  Luckily `esbuild` is quite fast
+    // enough to just run another build to inline this one file `chunk.js`.
+    const POSTBUILD = [
+        {
+            entryPoints: ["dist/cdn/perspective-viewer.js"],
+            format: "esm",
+            plugins: [NodeModulesExternal()],
+            external: ["*.wasm", "*.worker.js", "*.main.js"],
+            outdir: "dist/cdn",
+            allowOverwrite: true,
+        },
+    ];
+
+    await Promise.all(POSTBUILD.map(build)).catch(() => process.exit(1));
+
+    // Typecheck
+    execSync("tsc --project tsconfig.json", INHERIT);
+
+    // Generate themes via lightningcss bundling.
+    fs.mkdirSync("./dist/css/intl", { recursive: true });
+    const themes = [
+        "icons",
+        "intl",
+        "pro",
+        "pro-dark",
+        "botanical",
+        "monokai",
+        "phosphor",
+        "solarized",
+        "solarized-dark",
+        "vaporwave",
+        "gruvbox",
+        "gruvbox-dark",
+        "dracula",
+        "nord",
+        "ledger",
+        "blueprint",
+        "eggplant",
+        "velvet",
+        "themes",
+    ];
+
+    for (const name of themes) {
+        const filename = `./src/themes/${name}.css`;
+        const { code } = await bundleAsyncCss({
+            filename,
+            minify: true,
+            visitor: inlineUrlVisitor(filename),
+            resolver: resolveNPM(import.meta.url),
+        });
+
+        fs.writeFileSync(`dist/css/${name}.css`, code);
+    }
+
+    const intl_langs = ["ar", "de", "es", "fr", "ja", "pt", "zh"];
+    for (const lang of intl_langs) {
+        const filename = `./src/themes/intl/${lang}.css`;
+        const { code } = await bundleAsyncCss({
+            filename,
+            minify: true,
+            visitor: inlineUrlVisitor(filename),
+        });
+
+        fs.writeFileSync(`dist/css/intl/${lang}.css`, code);
+    }
+}
+
+build_all();

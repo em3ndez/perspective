@@ -1,0 +1,147 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+import type {
+    ControlEnvelope,
+    InitMsg,
+    WorkerEnvelope,
+    WorkerMsg,
+} from "../transport/protocol.ts";
+import type { WorkerRenderer } from "./renderer.worker.ts";
+import { dispatch } from "./dispatch.ts";
+
+const RENDERERS = new Map<number, WorkerRenderer>();
+
+/**
+ * Sessions whose `destroy` arrived before their async `bootstrap`
+ * resolved. Bootstrap does multiple awaits (wasm `initSync`, font
+ * loads, `open_table`, lazy chart-impl import); a host that connects
+ * then immediately disconnects a viewer can post `init` and `destroy`
+ * back-to-back, with `destroy` landing while the renderer is still
+ * being built. The plain `RENDERERS.get(sessionId)` lookup in the
+ * destroy branch would miss it and the bootstrap would then register a
+ * renderer (and its WebGL context) that nothing ever tears down —
+ * leaking one context per raced toggle until the browser evicts the
+ * oldest. We tombstone the id here and honor it when bootstrap lands.
+ */
+const PENDING_DESTROY = new Set<number>();
+
+function postSession(
+    sessionId: number,
+    msg: WorkerMsg,
+    transfer?: Transferable[],
+): void {
+    const envelope = { sessionId, msg } satisfies WorkerEnvelope;
+    if (transfer && transfer.length > 0) {
+        (self as unknown as MessagePort).postMessage(envelope, transfer);
+    } else {
+        (self as unknown as MessagePort).postMessage(envelope);
+    }
+}
+
+/**
+ * Adapter that satisfies the `MessagePort` shape `WorkerRenderer`
+ * expects (it only ever calls `.postMessage` on it). Outgoing posts
+ * get session-tagged on the way out so the host can route them to
+ * the right `RendererTransport` instance.
+ *
+ * The receive direction is handled exclusively by the worker-scope
+ * `self.addEventListener("message", …)` installed by `installSessionHost`;
+ * this adapter does not own a real port pair.
+ */
+export function makeSessionPort(sessionId: number): MessagePort {
+    return {
+        postMessage: (msg: WorkerMsg, transfer?: Transferable[]) =>
+            postSession(sessionId, msg, transfer),
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        start: () => {},
+        close: () => {},
+        dispatchEvent: () => false,
+        onmessage: null,
+        onmessageerror: null,
+    } as unknown as MessagePort;
+}
+
+/**
+ * Install the shared message handler on the worker scope. One worker
+ * process hosts many `WorkerRenderer` instances, one per `sessionId`
+ * allocated by the host's `RendererTransport`; this listener
+ * demultiplexes incoming `ControlEnvelope`s and routes them to the
+ * matching renderer.
+ *
+ * The `bootstrap` callback constructs a `WorkerRenderer` from an
+ * `InitMsg` and a session-tagged port. It's injected so this module
+ * doesn't need to import `renderer.worker` for runtime bindings (avoids
+ * a runtime cycle — `renderer.worker` imports this module).
+ */
+export function installSessionHost(
+    bootstrap: (msg: InitMsg, port: MessagePort) => Promise<WorkerRenderer>,
+): void {
+    self.addEventListener("message", function (e: MessageEvent) {
+        const env = e.data as ControlEnvelope;
+        const { sessionId, msg } = env;
+
+        if (msg.kind === "init") {
+            if (RENDERERS.has(sessionId)) {
+                // Should never happen.
+                postSession(sessionId, {
+                    kind: "error",
+                    message: `sessionId ${sessionId} already initialized`,
+                });
+                return;
+            }
+
+            bootstrap(msg as InitMsg, makeSessionPort(sessionId))
+                .then((r) => {
+                    // A `destroy` raced ahead of bootstrap completing —
+                    // honor it now instead of leaking the freshly-built
+                    // renderer + its WebGL context.
+                    if (PENDING_DESTROY.delete(sessionId)) {
+                        dispatch(r, { kind: "destroy" });
+                        return;
+                    }
+
+                    RENDERERS.set(sessionId, r);
+                })
+                .catch((err) => {
+                    PENDING_DESTROY.delete(sessionId);
+                    postSession(sessionId, {
+                        kind: "error",
+                        message: String(err),
+                    });
+                });
+            return;
+        }
+
+        if (msg.kind === "destroy") {
+            const r = RENDERERS.get(sessionId);
+            if (r) {
+                dispatch(r, msg);
+                RENDERERS.delete(sessionId);
+            } else {
+                // Renderer not registered yet — bootstrap is still in
+                // flight. Tombstone the id so the bootstrap `.then`
+                // tears it down on arrival instead of registering a
+                // leaked context.
+                PENDING_DESTROY.add(sessionId);
+            }
+
+            return;
+        }
+
+        const r = RENDERERS.get(sessionId);
+        if (r) {
+            dispatch(r, msg);
+        }
+    });
+}

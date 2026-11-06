@@ -1,0 +1,690 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+use std::collections::HashMap;
+
+use indexmap::{IndexMap, IndexSet};
+use prost::Message as ProstMessage;
+use prost::bytes::{Bytes, BytesMut};
+
+use super::data::RowPathStyle;
+use super::error::VirtualServerError;
+use super::generic_sql_model::{column_path_source, sort_column_paths};
+use super::handler::VirtualServerHandler;
+use crate::config::{GroupRollupMode, ViewConfig, ViewConfigUpdate};
+use crate::proto::response::ClientResp;
+use crate::proto::{
+    ColumnPathLevel, ColumnType, GetFeaturesResp, GetHostedTablesResp, HostedTable, MakeTableResp,
+    Request, Response, Scalar, ServerError, TableDeleteResp, TableDescribeResp, TableMakePortResp,
+    TableMakeViewResp, TableOnDeleteResp, TableRemoveDeleteResp, TableSchemaResp, TableSizeResp,
+    ViewCollapseResp, ViewColumnPathsResp, ViewDeleteResp, ViewDescription, ViewDimensionsResp,
+    ViewExpandResp, ViewExpressionSchemaResp, ViewGetConfigResp, ViewGetMinMaxResp,
+    ViewOnDeleteResp, ViewOnRemoveResp, ViewOnUpdateResp, ViewRemoveDeleteResp,
+    ViewRemoveOnRemoveResp, ViewRemoveOnUpdateResp, ViewSchemaResp, ViewSetDepthResp,
+    ViewToArrowResp, ViewToColumnsStringResp, ViewToCsvResp, ViewToNdjsonStringResp,
+    ViewToRowsStringResp, scalar, table_describe_resp,
+};
+use crate::table::{DescribeError, Description};
+
+macro_rules! respond {
+    ($msg:ident, $name:ident { $($rest:tt)* }) => {{
+        let mut resp = BytesMut::new();
+        let resp2 = ClientResp::$name($name {
+            $($rest)*
+        });
+
+        Response {
+            msg_id: $msg.msg_id,
+            entity_id: $msg.entity_id,
+            client_resp: Some(resp2),
+        }.encode(&mut resp).map_err(VirtualServerError::EncodeError)?;
+
+        resp.freeze()
+    }};
+}
+
+/// A virtual server that processes Perspective protocol messages.
+///
+/// `VirtualServer` acts as a bridge between the Perspective protocol and a
+/// custom data backend. It handles protocol decoding/encoding and delegates
+/// actual data operations to the provided [`VirtualServerHandler`].
+pub struct VirtualServer<T: VirtualServerHandler> {
+    handler: T,
+    view_to_table: IndexMap<String, String>,
+    view_configs: IndexMap<String, ViewConfig>,
+    view_schemas: IndexMap<String, IndexMap<String, ColumnType>>,
+
+    /// The tables made from views, which this server created and may drop.
+    view_tables: IndexSet<String>,
+
+    /// Per-view `table_describe` answers, computed LAZILY on the first
+    /// `ViewExpressionSchemaReq` for that view — never on view creation.
+    view_descriptions: IndexMap<String, Description>,
+}
+
+impl<T: VirtualServerHandler> VirtualServer<T> {
+    /// Creates a new virtual server with the given handler.
+    pub fn new(handler: T) -> Self {
+        Self {
+            handler,
+            view_configs: IndexMap::default(),
+            view_to_table: IndexMap::default(),
+            view_schemas: IndexMap::default(),
+            view_tables: IndexSet::default(),
+            view_descriptions: IndexMap::default(),
+        }
+    }
+
+    /// Processes a Perspective protocol request and returns the response.
+    ///
+    /// Decodes the incoming protobuf message, dispatches to the appropriate
+    /// handler method, and encodes the response.
+    pub async fn handle_request(
+        &mut self,
+        bytes: Bytes,
+    ) -> Result<Bytes, VirtualServerError<T::Error>> {
+        let msg = Request::decode(bytes).map_err(VirtualServerError::DecodeError)?;
+        tracing::debug!(
+            "Handling request: entity_id={}, req={:?}",
+            msg.entity_id,
+            msg.client_req
+        );
+
+        match self.internal_handle_request(msg.clone()).await {
+            Ok(resp) => Ok(resp),
+            Err(err) => {
+                tracing::error!("{}", err);
+                Ok(respond!(msg, ServerError {
+                    message: err.to_string(),
+                    status_code: 0
+                }))
+            },
+        }
+    }
+
+    /// Deletes every view this server still holds, as closing a native
+    /// `Session` does, returning the first handler error after attempting all.
+    pub async fn close(&mut self) -> Result<(), VirtualServerError<T::Error>> {
+        let mut result = Ok(());
+        for view_id in self.view_configs.keys().cloned().collect::<Vec<_>>() {
+            if let Err(err) = self.handler.view_delete(&view_id).await
+                && result.is_ok()
+            {
+                result = Err(err.into());
+            }
+
+            self.view_to_table.shift_remove(&view_id);
+            self.view_configs.shift_remove(&view_id);
+            self.view_schemas.shift_remove(&view_id);
+            self.view_descriptions.shift_remove(&view_id);
+        }
+
+        result
+    }
+
+    async fn get_cached_view_schema(
+        &mut self,
+        entity_id: &str,
+        to_psp_format: bool,
+    ) -> Result<IndexMap<String, ColumnType>, VirtualServerError<T::Error>> {
+        if !self.view_schemas.contains_key(entity_id) {
+            self.view_schemas.insert(
+                entity_id.to_string(),
+                self.handler
+                    .view_schema(entity_id, self.view_configs.get(entity_id).unwrap())
+                    .await?,
+            );
+        }
+
+        if to_psp_format {
+            // `view.schema()` is keyed by *source* column name, matching the
+            // native engine, while the cached schema is keyed by the view's
+            // actual (possibly pivoted-path) SQL column names.
+            let config = self.view_configs.get(entity_id).unwrap();
+            Ok(self
+                .view_schemas
+                .get(entity_id)
+                .unwrap()
+                .iter()
+                .map(|(k, v)| {
+                    let name = column_path_source(k, config)
+                        .map(|(_, col)| col.to_string())
+                        .unwrap_or_else(|| k.clone());
+
+                    (name, *v)
+                })
+                .collect())
+        } else {
+            Ok(self.view_schemas.get(entity_id).cloned().unwrap())
+        }
+    }
+
+    /// Whether `view_id` has an expandable row tree, or an error if this
+    /// server cannot expand one.
+    async fn is_expandable(&self, view_id: &str) -> Result<bool, VirtualServerError<T::Error>> {
+        if !self.handler.get_features().await?.expand_collapse {
+            return Err(VirtualServerError::Other(
+                "This data source does not support `expand`, `collapse` or `set_depth`".to_string(),
+            ));
+        }
+
+        let config = self
+            .view_configs
+            .get(view_id)
+            .ok_or_else(|| VirtualServerError::UnknownViewId(view_id.to_string()))?;
+
+        Ok(!config.group_by.is_empty() && config.group_rollup_mode == GroupRollupMode::Rollup)
+    }
+
+    async fn internal_handle_request(
+        &mut self,
+        msg: Request,
+    ) -> Result<Bytes, VirtualServerError<T::Error>> {
+        use crate::proto::request::ClientReq::*;
+        let resp = match msg.client_req.unwrap() {
+            GetFeaturesReq(_) => {
+                let features = self.handler.get_features().await?;
+                respond!(msg, GetFeaturesResp { ..features.into() })
+            },
+            GetHostedTablesReq(_) => {
+                let mut table_infos = self.handler.get_hosted_tables().await?;
+                for name in &self.view_tables {
+                    if !table_infos.iter().any(|x| &x.entity_id == name) {
+                        table_infos.push(HostedTable {
+                            entity_id: name.clone(),
+                            index: Vec::new(),
+                            limit: None,
+                        });
+                    }
+                }
+
+                respond!(msg, GetHostedTablesResp { table_infos })
+            },
+            TableSchemaReq(_) => {
+                respond!(msg, TableSchemaResp {
+                    schema: Some(crate::proto::Schema {
+                        schema: self
+                            .handler
+                            .table_schema(msg.entity_id.as_str())
+                            .await?
+                            .iter()
+                            .map(|x| crate::proto::schema::KeyTypePair {
+                                name: x.0.to_string(),
+                                r#type: *x.1 as i32,
+                            })
+                            .collect()
+                    })
+                })
+            },
+            TableMakePortReq(req) => {
+                respond!(msg, TableMakePortResp {
+                    port_id: self.handler.table_make_port(&req).await?
+                })
+            },
+            TableMakeViewReq(req) => {
+                self.view_to_table
+                    .insert(req.view_id.clone(), msg.entity_id.clone());
+
+                let mut config: ViewConfigUpdate = req.config.clone().unwrap_or_default().into();
+                if let Some(group_by) = &config.group_by
+                    && let Some(duplicate) = group_by
+                        .iter()
+                        .enumerate()
+                        .find(|(idx, col)| group_by[..*idx].contains(*col))
+                {
+                    return Err(VirtualServerError::Other(format!(
+                        "Duplicate column `{}` in `group_by`",
+                        duplicate.1
+                    )));
+                }
+
+                // An UNORDERED store has no natural row order to fall back
+                // on, so every window must carry an explicit `order_by`.
+                if let Some(windows) = &config.windows
+                    && windows.values().any(|w| w.order_by.is_none())
+                    && self.handler.get_features().await?.unordered
+                {
+                    return Err(VirtualServerError::Other(
+                        "This data store is unordered - windows require an explicit `order_by`"
+                            .to_string(),
+                    ));
+                }
+
+                let bytes = respond!(msg, TableMakeViewResp {
+                    view_id: self
+                        .handler
+                        .table_make_view(msg.entity_id.as_str(), req.view_id.as_str(), &mut config)
+                        .await?
+                });
+
+                self.view_configs.insert(req.view_id.clone(), config.into());
+                bytes
+            },
+            TableSizeReq(_) => {
+                respond!(msg, TableSizeResp {
+                    size: self.handler.table_size(msg.entity_id.as_str()).await?
+                })
+            },
+            TableDescribeReq(req) => {
+                let config: ViewConfig = req.config.unwrap_or_default().into();
+                let verdict = self
+                    .handler
+                    .table_describe(msg.entity_id.as_str(), &config)
+                    .await?;
+
+                let (expression_schema, expression_errors, result) = match verdict {
+                    Ok(d) => (
+                        d.expression_schema,
+                        HashMap::new(),
+                        Some(table_describe_resp::Result::View(ViewDescription {
+                            schema: d
+                                .view_schema
+                                .into_iter()
+                                .map(|(x, y)| (x, y as i32))
+                                .collect(),
+                        })),
+                    ),
+                    Err(DescribeError::Expressions {
+                        expression_schema,
+                        errors,
+                    }) => (expression_schema, errors, None),
+                    Err(DescribeError::Config(msg)) => (
+                        HashMap::new(),
+                        HashMap::new(),
+                        Some(table_describe_resp::Result::ConfigError(msg)),
+                    ),
+                };
+
+                respond!(msg, TableDescribeResp {
+                    expression_schema: expression_schema
+                        .into_iter()
+                        .map(|(x, y)| (x, y as i32))
+                        .collect(),
+                    expression_errors,
+                    result,
+                })
+            },
+            ViewSchemaReq(_) => {
+                respond!(msg, ViewSchemaResp {
+                    schema: self
+                        .get_cached_view_schema(&msg.entity_id, true)
+                        .await?
+                        .into_iter()
+                        .map(|(x, y)| (x.to_string(), y as i32))
+                        .collect()
+                })
+            },
+            ViewDimensionsReq(_) => {
+                let view_id = &msg.entity_id;
+                let table_id = self
+                    .view_to_table
+                    .get(view_id)
+                    .ok_or_else(|| VirtualServerError::UnknownViewId(view_id.to_string()))?;
+
+                let num_table_rows = self.handler.table_size(table_id).await?;
+                let num_table_columns = self.handler.table_column_size(table_id).await? as u32;
+                let config = self.view_configs.get(view_id).unwrap();
+                let num_view_columns = self.handler.view_column_size(view_id, config).await? as u32;
+                let num_view_rows = self.handler.view_size(view_id).await?;
+                let resp = ViewDimensionsResp {
+                    num_table_columns,
+                    num_table_rows,
+                    num_view_columns,
+                    num_view_rows,
+                };
+
+                respond!(msg, ViewDimensionsResp { ..resp })
+            },
+            ViewGetConfigReq(_) => {
+                respond!(msg, ViewGetConfigResp {
+                    config: Some(
+                        ViewConfigUpdate::from(
+                            self.view_configs.get(&msg.entity_id).unwrap().clone()
+                        )
+                        .into()
+                    )
+                })
+            },
+            ViewExpressionSchemaReq(_) => {
+                let view_id = msg.entity_id.clone();
+                if !self.view_descriptions.contains_key(&view_id) {
+                    let table_id = self
+                        .view_to_table
+                        .get(&view_id)
+                        .cloned()
+                        .ok_or_else(|| VirtualServerError::UnknownViewId(view_id.clone()))?;
+
+                    let config = self.view_configs.get(&view_id).unwrap().clone();
+                    let description = self
+                        .handler
+                        .table_describe(&table_id, &config)
+                        .await?
+                        .map_err(|e| VirtualServerError::Other(e.to_string()))?;
+
+                    self.view_descriptions.insert(view_id.clone(), description);
+                }
+
+                let schema = self.view_descriptions[&view_id]
+                    .expression_schema
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), *ty as i32))
+                    .collect();
+
+                respond!(msg, ViewExpressionSchemaResp { schema })
+            },
+            ViewColumnPathsReq(view_column_paths_req) => {
+                let config = self.view_configs.get(&msg.entity_id).unwrap();
+                let mut paths: Vec<String> = self
+                    .handler
+                    .view_schema(msg.entity_id.as_str(), config)
+                    .await?
+                    .keys()
+                    .cloned()
+                    .collect();
+
+                if !config.split_by.is_empty() {
+                    sort_column_paths(&mut paths, config);
+                }
+
+                let start = view_column_paths_req.start_col.unwrap_or(0) as usize;
+                let end = view_column_paths_req
+                    .end_col
+                    .map_or(paths.len(), |x| x as usize);
+
+                let paths = paths
+                    .into_iter()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                    .collect::<Vec<_>>();
+
+                let depth = config.split_by.len() + 1;
+                let mut area = vec![
+                    ColumnPathLevel {
+                        values: Vec::with_capacity(paths.len())
+                    };
+                    depth
+                ];
+
+                for path in paths {
+                    let mut split = path.splitn(depth, '|');
+                    let mut levels = Vec::with_capacity(depth);
+                    for _ in 0..depth {
+                        match split.next() {
+                            Some(x) => levels.push(Some(x.to_owned())),
+                            None => levels.push(None),
+                        }
+                    }
+
+                    let name = levels
+                        .iter()
+                        .rposition(|x| x.is_some())
+                        .map(|i| levels[i].take().unwrap())
+                        .unwrap_or_default();
+
+                    for (level, value) in area.iter_mut().zip(levels).take(depth - 1) {
+                        level.values.push(Scalar {
+                            scalar: value.map(scalar::Scalar::String),
+                        });
+                    }
+
+                    area[depth - 1].values.push(Scalar {
+                        scalar: Some(scalar::Scalar::String(name)),
+                    });
+                }
+
+                respond!(msg, ViewColumnPathsResp { area })
+            },
+            ViewToArrowReq(view_to_arrow_req) => {
+                let viewport = view_to_arrow_req.viewport.unwrap();
+                let schema = self.get_cached_view_schema(&msg.entity_id, false).await?;
+                let config = self.view_configs.get(&msg.entity_id).unwrap();
+                let mut cols = self
+                    .handler
+                    .view_get_data(msg.entity_id.as_str(), config, &schema, &viewport)
+                    .await?;
+
+                let arrow = cols
+                    .render_to_arrow_ipc()
+                    .map_err(|e| VirtualServerError::Other(e.to_string()))?;
+
+                respond!(msg, ViewToArrowResp { arrow })
+            },
+            ViewToCsvReq(view_to_csv_req) => {
+                let viewport = view_to_csv_req.viewport.unwrap();
+                let schema = self.get_cached_view_schema(&msg.entity_id, false).await?;
+                let config = self.view_configs.get(&msg.entity_id).unwrap();
+                let mut cols = self
+                    .handler
+                    .view_get_data(msg.entity_id.as_str(), config, &schema, &viewport)
+                    .await?;
+
+                let rows = cols.render_to_rows(RowPathStyle::PerLevel);
+                let mut csv = String::new();
+                if let Some(first_row) = rows.first() {
+                    let headers: Vec<&str> = first_row.keys().map(|k| k.as_str()).collect();
+                    csv.push_str(&headers.join(","));
+                    csv.push('\n');
+                }
+
+                for row in &rows {
+                    let values: Vec<String> = row
+                        .values()
+                        .map(|cell| serde_json::to_string(cell).unwrap_or_default())
+                        .collect();
+                    csv.push_str(&values.join(","));
+                    csv.push('\n');
+                }
+
+                respond!(msg, ViewToCsvResp { csv })
+            },
+            ViewToNdjsonStringReq(view_to_ndjson_req) => {
+                let viewport = view_to_ndjson_req.viewport.unwrap();
+                let schema = self.get_cached_view_schema(&msg.entity_id, false).await?;
+                let config = self.view_configs.get(&msg.entity_id).unwrap();
+                let mut cols = self
+                    .handler
+                    .view_get_data(msg.entity_id.as_str(), config, &schema, &viewport)
+                    .await?;
+
+                let rows = cols.render_to_rows(RowPathStyle::Sidecar);
+                let ndjson_string = rows
+                    .iter()
+                    .map(serde_json::to_string)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| VirtualServerError::InvalidJSON(std::sync::Arc::new(e)))?
+                    .join("\n");
+
+                respond!(msg, ViewToNdjsonStringResp { ndjson_string })
+            },
+            ViewToRowsStringReq(view_to_rows_string_req) => {
+                let viewport = view_to_rows_string_req.viewport.unwrap();
+                let schema = self.get_cached_view_schema(&msg.entity_id, false).await?;
+                let config = self.view_configs.get(&msg.entity_id).unwrap();
+                let mut cols = self
+                    .handler
+                    .view_get_data(msg.entity_id.as_str(), config, &schema, &viewport)
+                    .await?;
+
+                let rows = cols.render_to_rows(RowPathStyle::Sidecar);
+                let json_string = serde_json::to_string(&rows)
+                    .map_err(|e| VirtualServerError::InvalidJSON(std::sync::Arc::new(e)))?;
+
+                respond!(msg, ViewToRowsStringResp { json_string })
+            },
+            ViewToColumnsStringReq(view_to_columns_string_req) => {
+                let viewport = view_to_columns_string_req.viewport.unwrap();
+                let schema = self.get_cached_view_schema(&msg.entity_id, false).await?;
+                let config = self.view_configs.get(&msg.entity_id).unwrap();
+                let mut cols = self
+                    .handler
+                    .view_get_data(msg.entity_id.as_str(), config, &schema, &viewport)
+                    .await?;
+
+                let json_string = cols
+                    .render_to_columns_json(
+                        RowPathStyle::Sidecar,
+                        view_to_columns_string_req.id.unwrap_or_default(),
+                    )
+                    .map_err(|e| VirtualServerError::Other(e.to_string()))?;
+
+                respond!(msg, ViewToColumnsStringResp { json_string })
+            },
+            ViewDeleteReq(_) => {
+                self.handler.view_delete(msg.entity_id.as_str()).await?;
+                self.view_to_table.shift_remove(&msg.entity_id);
+                self.view_configs.shift_remove(&msg.entity_id);
+                self.view_descriptions.shift_remove(&msg.entity_id);
+                respond!(msg, ViewDeleteResp {})
+            },
+            MakeTableReq(req) => {
+                let data = req.data.as_ref().unwrap();
+                if let Some(crate::proto::make_table_data::Data::FromView(view_id)) = &data.data {
+                    if !self.handler.get_features().await?.view_derivations {
+                        return Err(VirtualServerError::Other(
+                            "This data source cannot derive a Table from a View".to_string(),
+                        ));
+                    }
+
+                    let options = req.options.clone().unwrap_or_default();
+                    if options.make_table_type.is_some() {
+                        return Err(VirtualServerError::Other(
+                            "`index` and `limit` cannot be set on a Table made from a View"
+                                .to_string(),
+                        ));
+                    }
+
+                    let config = self.view_configs.get(view_id).ok_or_else(|| {
+                        VirtualServerError::Other(format!("View \"{}\" does not exist", view_id))
+                    })?;
+
+                    let schema = options
+                        .view_schema
+                        .map(|schema| {
+                            schema
+                                .schema
+                                .into_iter()
+                                .map(|x| Ok((x.name, ColumnType::try_from(x.r#type)?)))
+                                .collect::<Result<IndexMap<_, _>, prost::DecodeError>>()
+                        })
+                        .transpose()
+                        .map_err(|e| VirtualServerError::Other(e.to_string()))?;
+
+                    self.handler
+                        .view_make_table(view_id, &msg.entity_id, config, schema.as_ref())
+                        .await?;
+
+                    self.view_tables.insert(msg.entity_id.clone());
+                } else {
+                    self.handler.make_table(&msg.entity_id, data).await?;
+                }
+
+                respond!(msg, MakeTableResp {})
+            },
+            ViewGetMinMaxReq(req) => {
+                let config = self.view_configs.get(&msg.entity_id).unwrap();
+                let (min, max) = self
+                    .handler
+                    .view_get_min_max(&msg.entity_id, &req.column_name, config)
+                    .await?;
+                respond!(msg, ViewGetMinMaxResp {
+                    min: Some(min.into()),
+                    max: Some(max.into()),
+                })
+            },
+
+            ViewExpandReq(req) => {
+                let num_changed = if self.is_expandable(&msg.entity_id).await? {
+                    let config = &self.view_configs[&msg.entity_id];
+                    self.handler
+                        .view_expand(&msg.entity_id, config, req.row_index)
+                        .await?
+                } else {
+                    0
+                };
+
+                respond!(msg, ViewExpandResp { num_changed })
+            },
+            ViewCollapseReq(req) => {
+                let num_changed = if self.is_expandable(&msg.entity_id).await? {
+                    let config = &self.view_configs[&msg.entity_id];
+                    self.handler
+                        .view_collapse(&msg.entity_id, config, req.row_index)
+                        .await?
+                } else {
+                    0
+                };
+
+                respond!(msg, ViewCollapseResp { num_changed })
+            },
+            ViewSetDepthReq(req) => {
+                if self.is_expandable(&msg.entity_id).await? {
+                    let config = &self.view_configs[&msg.entity_id];
+                    if req.depth as usize <= config.group_by.len() {
+                        self.handler
+                            .view_set_depth(&msg.entity_id, config, req.depth)
+                            .await?;
+                    }
+                }
+
+                respond!(msg, ViewSetDepthResp {})
+            },
+
+            TableDeleteReq(_) if self.view_tables.contains(&msg.entity_id) => {
+                self.handler.table_delete(msg.entity_id.as_str()).await?;
+                self.view_tables.shift_remove(&msg.entity_id);
+                respond!(msg, TableDeleteResp {})
+            },
+
+            // Stub implementations for callback/update requests that VirtualServer doesn't support
+            TableOnDeleteReq(_) => {
+                respond!(msg, TableOnDeleteResp {})
+            },
+            ViewOnRemoveReq(_) => {
+                respond!(msg, ViewOnRemoveResp {
+                    indices: None,
+                    port_id: 0
+                })
+            },
+            ViewRemoveOnRemoveReq(_) => {
+                respond!(msg, ViewRemoveOnRemoveResp {})
+            },
+            ViewOnUpdateReq(_) => {
+                respond!(msg, ViewOnUpdateResp {
+                    delta: None,
+                    port_id: 0,
+                    reset: false
+                })
+            },
+            ViewOnDeleteReq(_) => {
+                respond!(msg, ViewOnDeleteResp {})
+            },
+            ViewRemoveOnUpdateReq(_) => {
+                respond!(msg, ViewRemoveOnUpdateResp {})
+            },
+            TableRemoveDeleteReq(_) => {
+                respond!(msg, TableRemoveDeleteResp {})
+            },
+            ViewRemoveDeleteReq(_) => {
+                respond!(msg, ViewRemoveDeleteResp {})
+            },
+            x => {
+                // Return an error response instead of empty bytes
+                return Err(VirtualServerError::Other(format!(
+                    "Unhandled request: {:?}",
+                    x
+                )));
+            },
+        };
+
+        Ok(resp)
+    }
+}

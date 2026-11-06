@@ -1,0 +1,115 @@
+/* ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+ * ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+ * ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+ * ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+ * ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+ * ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+ * ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+ * ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+ * ┃ This file is part of the Perspective library, distributed under the terms ┃
+ * ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+ * ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ */
+
+:host {
+    #debug-panel-overflow {
+        overflow: hidden;
+        display: flex;
+    }
+
+    #debug-panel {
+        display: flex;
+        min-width: 150px;
+        label {
+            display: block;
+            margin-bottom: 2px;
+            font-size: var(--label--font-size, 0.75em);
+        }
+
+        #debug-panel-controls {
+            display: flex;
+            flex: 0 0 auto;
+            gap: 0.333333em;
+            padding: 12px 8px 0px 0px;
+            align-items: center;
+            button {
+                appearance: none;
+                background-color: transparent;
+                border-radius: 3px;
+                border: 1px solid var(--psp--color);
+                color: inherit;
+                cursor: pointer;
+                flex: 0 1 100px;
+                font-family: inherit;
+                font-size: 0.8333em;
+                text-transform: uppercase;
+                height: 24px;
+                text-overflow: ellipsis;
+                overflow: hidden;
+                width: 0px;
+                &:not([disabled]):hover {
+                    background-color: var(--psp--color);
+                    color: var(--psp--background-color);
+                }
+
+                &#debug-panel-apply:before {
+                    content: var(
+                        --psp-label--apply-button--content,
+                        var(--psp-missing)
+                    );
+                }
+
+                &#debug-panel-reset:before {
+                    content: var(
+                        --psp-label--reset-button--content,
+                        var(--psp-missing)
+                    );
+                }
+
+                &#debug-panel-copy:before {
+                    content: var(
+                        --psp-label--copy-button--content,
+                        var(--psp-missing)
+                    );
+                }
+
+                &#debug-panel-paste:before {
+                    content: var(
+                        --psp-label--paste-button--content,
+                        var(--psp-missing)
+                    );
+                }
+
+                &[disabled] {
+                    cursor: not-allowed;
+                    opacity: 0.2;
+                }
+            }
+        }
+
+        #debug-panel-editor {
+            display: flex;
+            flex-direction: column;
+            flex: 0 1 auto;
+            overflow: hidden;
+            padding: 8px 8px 8px 0;
+
+            #debug-panel-error {
+                flex: 0 0 auto;
+                padding-top: 6px;
+                font-size: 10px;
+                color: var(--psp-error--color);
+                white-space: pre-wrap;
+                overflow-wrap: anywhere;
+            }
+        }
+
+        #editor {
+            background-color: var(--psp--background-color);
+            border: 1px solid var(--psp-inactive--color);
+            border-radius: 2px;
+            font-size: 0.8em;
+            /* height: 100%; */
+        }
+    }
+}

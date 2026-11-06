@@ -1,0 +1,13 @@
+{
+    "extends": "../../tsconfig.base.json",
+    "compilerOptions": {
+        "outDir": "./dist/esm",
+        "rootDir": "./src/ts",
+        "types": []
+    },
+    "files": [
+        "./src/ts/perspective.browser.ts",
+        "./src/ts/virtual_servers/duckdb.ts",
+        "./src/ts/virtual_servers/clickhouse.ts"
+    ]
+}

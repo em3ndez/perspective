@@ -1,0 +1,398 @@
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+// ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+// ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+// ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+// ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+// ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+// ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+// ┃ This file is part of the Perspective library, distributed under the terms ┃
+// ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+import { PRIVATE_PLUGIN_SYMBOL } from "../types.ts";
+import { isMetaColumn } from "../model/meta_columns.ts";
+import { reconcile_column_widths } from "../model/column_overrides.ts";
+import {
+    column_name,
+    split_levels,
+    write_area,
+    write_flat_area,
+} from "../model/column_path_area.ts";
+import { format_cell } from "./format_cell.ts";
+import {
+    ColumnHeaderLabels,
+    type ColumnHeaderLabel,
+} from "./format_column_header.ts";
+import {
+    format_flat_header_row_path,
+    format_tree_header,
+    format_tree_header_row_path,
+} from "./format_tree_header.ts";
+import type {
+    ResolvedColumnsConfig,
+    DatagridModel,
+    RegularTable,
+    Schema,
+} from "../types.ts";
+import type { CellScalar, DataResponse } from "regular-table/dist/esm/types.js";
+import type { ViewConfig, ViewWindow } from "@perspective-dev/client";
+import type { HTMLPerspectiveViewerElement } from "@perspective-dev/viewer";
+
+interface ColumnData {
+    __ROW_PATH__?: unknown[][];
+    __ID__?: unknown[][];
+    [key: string]: unknown[] | undefined;
+}
+
+/**
+ * Creates a new DataListener, suitable for passing to `regular-table`'s
+ * `.setDataListener()` method. This should be called as a method on the
+ * plugin.
+ *
+ * @returns A data listener for the plugin.
+ */
+export function createDataListener(
+    viewer: HTMLPerspectiveViewerElement,
+): (
+    regularTable: RegularTable,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+) => Promise<DataResponse> {
+    let last_meta: unknown[][] | undefined;
+    let last_column_paths: string[] | undefined;
+    let last_ids: unknown[][] | undefined;
+    let last_reverse_ids: Map<string, number> | undefined;
+    let last_reverse_columns: Map<string, number> | undefined;
+    const header_labels = new ColumnHeaderLabels();
+
+    return async function dataListener(
+        this: DatagridModel,
+        regularTable: RegularTable,
+        x0: number,
+        y0: number,
+        x1: number,
+        y1: number,
+    ): Promise<DataResponse> {
+        let columns: ColumnData = {};
+        const new_window: ViewWindow = {
+            start_row: y0,
+            start_col: x0,
+            end_row: y1,
+            end_col: x1,
+            id: true,
+        };
+
+        let num_columns: number | null = null;
+
+        if (x1 - x0 > 0 && y1 - y0 > 0) {
+            this._is_old_viewport =
+                this._last_window?.start_row === y0 &&
+                this._last_window?.end_row === y1 &&
+                this._last_window?.start_col === x0 &&
+                this._last_window?.end_col === x1;
+
+            const lookahead =
+                this._config.group_by.length > 0 && y1 < this._num_rows ? 1 : 0;
+
+            const [x, z] = await Promise.all([
+                this._view.to_columns_string({
+                    ...new_window,
+                    end_row: y1 + lookahead,
+                } as any),
+                this._view.num_columns(),
+            ]);
+
+            num_columns = z;
+            columns = JSON.parse(x as string) as ColumnData;
+            const is_flat_rollup = this._config.group_rollup_mode === "flat";
+            this._row_header_depths = {
+                start_row: y0,
+                depths: (columns.__ROW_PATH__ ?? []).map((path) =>
+                    is_flat_rollup ? path.length : path.length + 1,
+                ),
+            };
+
+            if (lookahead > 0) {
+                for (const key of Object.keys(columns)) {
+                    columns[key] = columns[key]?.slice(0, y1 - y0);
+                }
+            }
+
+            const y = Object.keys(columns);
+            // `isMetaColumn` covers `__ROW_PATH__`, `__ID__`,
+            // `__GROUPING_ID__`, and the per-level `__ROW_PATH_<n>__`
+            // columns the DuckDB virtual server emits inline alongside
+            // the JSON sidecar. Exact-match against `__ROW_PATH__` /
+            // `__ID__` (the previous filter) misses the per-level
+            // form and the virtual server's columns leak into the
+            // visible grid.
+            const new_col_paths = y.filter((x) => !isMetaColumn(x));
+
+            let changed_cols = false;
+            for (let i = 0; i < new_col_paths.length; i++) {
+                if (
+                    this._column_paths[new_window.start_col! + i] !==
+                    new_col_paths[i]
+                ) {
+                    changed_cols = true;
+                    this._column_paths[new_window.start_col! + i] =
+                        new_col_paths[i];
+                }
+            }
+
+            if (changed_cols) {
+                const is_pivoted = this._config.split_by.length > 0;
+                const [a, b, area] = await Promise.all([
+                    this._view.schema(),
+                    this._view.expression_schema(),
+                    is_pivoted
+                        ? this._view.column_paths({
+                              start_col: x0,
+                              end_col: x1,
+                          })
+                        : Promise.resolve(null),
+                ]);
+
+                if (area === null) {
+                    write_flat_area(
+                        this._column_path_area,
+                        new_col_paths,
+                        new_window.start_col!,
+                    );
+                } else {
+                    write_area(
+                        this._column_path_area,
+                        area as (CellScalar | null)[][],
+                        new_window.start_col!,
+                    );
+                }
+
+                this._schema = { ...(a as Schema), ...(b as Schema) };
+                for (let i = 0; i < new_col_paths.length; i++) {
+                    const column = column_name(this, i + new_window.start_col!);
+
+                    this._is_editable[i + new_window.start_col!] =
+                        !!this._table_schema[column];
+
+                    this._column_types[i + new_window.start_col!] =
+                        this._schema[column];
+                }
+            }
+
+            this._last_window = new_window;
+            this._ids =
+                columns.__ID__ ||
+                Array(y1 - y0)
+                    .fill(null)
+                    .map((_, index) => [index + y0]);
+
+            this._reverse_columns = this._column_paths
+                .slice(x0, x1)
+                .reduce((acc, x, i) => {
+                    acc.set(x, i);
+                    return acc;
+                }, new Map<string, number>());
+
+            this._reverse_ids = this._ids?.reduce((acc, x, i) => {
+                acc.set(x?.join("|"), i);
+                return acc;
+            }, new Map<string, number>());
+        } else {
+            num_columns = await this._view.num_columns();
+        }
+
+        const data: (string | HTMLElement)[][] = [];
+        const metadata: unknown[][] = [];
+        const column_headers: (string | ColumnHeaderLabel)[][] = [];
+        const column_paths: string[] = [];
+
+        const is_settings_open =
+            this._column_menus &&
+            viewer.hasAttribute("settings") &&
+            (this._panel === undefined ||
+                viewer.getActivePanel() === this._panel);
+
+        const is_dim_call = x1 - x0 > 0 && y1 - y0 > 0;
+        const is_row_path = columns.__ROW_PATH__ !== undefined;
+        const is_flat = this._config.group_rollup_mode === "flat";
+        const row_headers = Array.from(
+            (is_row_path
+                ? is_flat
+                    ? format_flat_header_row_path
+                    : format_tree_header_row_path
+                : format_tree_header
+            ).call(
+                this,
+                columns.__ROW_PATH__,
+                this._config.group_by,
+                regularTable,
+            ),
+        ) as (string | HTMLElement)[][];
+
+        const num_row_headers = !is_dim_call
+            ? row_header_depth(this._config)
+            : row_headers[0]?.length;
+
+        this._num_row_headers = num_row_headers ?? 0;
+
+        const live_overrides = is_dim_call
+            ? reconcile_column_widths(this, regularTable, x0, x1)
+            : {};
+
+        const columns_config: ResolvedColumnsConfig =
+            (regularTable as any)[PRIVATE_PLUGIN_SYMBOL] || {};
+
+        for (
+            let ipath = x0;
+            ipath < Math.min(x1, this._column_paths.length);
+            ++ipath
+        ) {
+            const path = this._column_paths[ipath];
+            const name = column_name(this, ipath);
+            const levels = split_levels(this, ipath);
+            const n_split_levels = levels.length;
+
+            // Pads are zero-width spaces repeated by group depth, NOT `""`:
+            // regular-table merges header cells on bare value equality
+            // across the whole row, so a plain `""` pad would merge with an
+            // adjacent group's equal pad - or, for the grand-total group's
+            // row-0 cell, with the blank CORNER `<th>` beside it, swallowing
+            // the column and its group-boundary border. Depth-keying makes
+            // pads equal exactly within one group - same-depth groups are
+            // never adjacent in the pre-order column space - so pads merge
+            // inside a group and never across one. The grand-total group has
+            // no real levels, so its entire header stack is pads (rendering
+            // blank).
+            const path_parts: (string | ColumnHeaderLabel)[] = levels.slice(
+                0,
+            ) as (string | ColumnHeaderLabel)[];
+
+            if (n_split_levels < this._config.split_by.length) {
+                const pad = "\u200b".repeat(n_split_levels + 1);
+                while (path_parts.length < this._config.split_by.length) {
+                    path_parts.push(pad);
+                }
+            }
+
+            path_parts.push(name);
+            const column = columns[path] || new Array(y1 - y0).fill(null);
+            const column_config = columns_config[name];
+
+            const wrap =
+                (column_config?.word_wrap ?? this._word_wrap) &&
+                live_overrides[ipath + this._num_row_headers] !== undefined;
+
+            const agg_depth = Math.min(
+                column_config?.aggregate_depth || 0,
+                this._config.group_by.length,
+            );
+
+            data.push(
+                column.map((x, i) => {
+                    if ((columns?.__ROW_PATH__?.[i]?.length ?? 0) < agg_depth) {
+                        return "";
+                    }
+
+                    const cell = format_cell.call(
+                        this,
+                        name,
+                        x,
+                        columns_config,
+                    ) as string | HTMLElement;
+
+                    return wrap ? wrap_cell(cell) : cell;
+                }),
+            );
+
+            metadata.push(column as unknown[]);
+            const header: (string | ColumnHeaderLabel)[] = path_parts.slice();
+            for (let level = 0; level < n_split_levels; level++) {
+                header[level] = header_labels.format(
+                    this,
+                    levels,
+                    level,
+                    columns_config,
+                );
+            }
+
+            if (is_settings_open) {
+                header.push("");
+            }
+
+            column_headers.push(header);
+            column_paths.push(path);
+        }
+
+        // Only update the last state if this is not a "phantom" call.
+        if (is_dim_call) {
+            this.last_column_paths = last_column_paths;
+            this.last_meta = last_meta;
+            this.last_ids = last_ids;
+            this.last_reverse_ids = last_reverse_ids;
+            this.last_reverse_columns = last_reverse_columns;
+
+            last_column_paths = column_paths;
+            last_meta = metadata;
+            last_ids = this._ids;
+            last_reverse_ids = this._reverse_ids;
+            last_reverse_columns = this._reverse_columns;
+        }
+
+        const result: DataResponse = {
+            num_column_headers:
+                this._config.split_by.length + (is_settings_open ? 2 : 1),
+            num_row_headers,
+            num_rows: this._num_rows,
+            num_columns,
+            row_headers: row_headers as CellScalar[][], // Add `HTMLElement`
+            column_headers: column_headers as CellScalar[][],
+            data: data as CellScalar[][],
+            metadata,
+            column_header_merge_depth: Math.max(
+                0,
+                this._config.split_by.length,
+            ),
+        };
+
+        if (this._row_height !== undefined) {
+            result.row_height = this._row_height;
+        }
+
+        return result;
+    };
+}
+
+/**
+ * Box a cell's content in the block `word_wrap` clamps to the row, leaving
+ * null and blank cells bare.
+ */
+function wrap_cell(content: string | HTMLElement): string | HTMLElement {
+    if (!content) {
+        return content;
+    }
+
+    const block = document.createElement("div");
+    block.className = "psp-wrap";
+    if (content instanceof HTMLElement) {
+        block.appendChild(content);
+    } else {
+        block.textContent = content;
+    }
+
+    return block;
+}
+
+function row_header_depth(config: ViewConfig) {
+    if (config.group_rollup_mode === "flat") {
+        return config.group_by.length;
+    } else if (config.group_rollup_mode === "total") {
+        return 0;
+    } else if (config.group_by.length === 0) {
+        return 0;
+    } else {
+        return config.group_by.length + 1;
+    }
+}

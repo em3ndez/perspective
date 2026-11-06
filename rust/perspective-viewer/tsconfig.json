@@ -1,15 +1,10 @@
 {
+    "extends": "../../tsconfig.base.json",
     "compilerOptions": {
-        "module": "esnext",
-        "target": "es2018",
-        "declaration": true,
-        "diagnostics": true,
-        "emitDeclarationOnly": true,
-        "outDir": "dist/esm",
-        "rootDir": "src/ts",
-        "allowSyntheticDefaultImports": true,
-        "moduleResolution": "node",
-        "skipLibCheck": true
+        "jsx": "preserve",
+        "outDir": "./dist/esm",
+        "rootDir": "./src/ts",
+        "typeRoots": ["./node_modules/@types"]
     },
-    "files": ["src/ts/perspective-viewer.ts"],
+    "include": ["./src/ts/**/*"]
 }

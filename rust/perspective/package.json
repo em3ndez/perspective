@@ -1,0 +1,18 @@
+{
+    "name": "@perspective-dev/rust",
+    "version": "5.8.0",
+    "description": "",
+    "private": true,
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/perspective-dev/perspective.git",
+        "directory": "rust/perspective"
+    },
+    "type": "module",
+    "license": "Apache-2.0",
+    "scripts": {
+        "build": "node build.mjs",
+        "clean": "cargo clean",
+        "test": "cargo test"
+    }
+}

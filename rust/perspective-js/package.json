@@ -1,0 +1,116 @@
+{
+    "name": "@perspective-dev/client",
+    "version": "5.8.0",
+    "description": "Streaming query engine for data grids, pivot tables and charts over large, real-time datasets — WebAssembly in the browser, native in Node.js, or remote over WebSocket.",
+    "keywords": [
+        "perspective",
+        "datagrid",
+        "data-grid",
+        "pivot-table",
+        "pivot",
+        "charts",
+        "visualization",
+        "dashboard",
+        "analytics",
+        "bi",
+        "streaming",
+        "real-time",
+        "wasm",
+        "webassembly",
+        "arrow",
+        "duckdb",
+        "clickhouse",
+        "websocket"
+    ],
+    "homepage": "https://perspective-dev.github.io",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/perspective-dev/perspective.git",
+        "directory": "rust/perspective-js"
+    },
+    "type": "module",
+    "license": "Apache-2.0",
+    "sideEffects": false,
+    "unpkg": "dist/cdn/perspective.js",
+    "jsdelivr": "dist/cdn/perspective.js",
+    "exports": {
+        ".": {
+            "node": {
+                "types": "./dist/esm/perspective.node.d.ts",
+                "import": "./dist/esm/perspective.node.js",
+                "default": "./dist/esm/perspective.node.js"
+            },
+            "types": "./dist/esm/perspective.browser.d.ts",
+            "import": "./dist/esm/perspective.js",
+            "default": "./dist/esm/perspective.js"
+        },
+        "./node": {
+            "types": "./dist/esm/perspective.node.d.ts",
+            "import": "./dist/esm/perspective.node.js",
+            "default": "./dist/esm/perspective.node.js"
+        },
+        "./virtual_servers/*": {
+            "types": "./dist/esm/virtual_servers/*.d.ts",
+            "import": "./dist/esm/virtual_servers/*.js",
+            "default": "./dist/esm/virtual_servers/*.js"
+        },
+        "./registry": {
+            "types": "./dist/esm/wasm/registry.d.ts",
+            "default": "./dist/esm/wasm/registry.js"
+        },
+        "./dist/*": "./dist/*",
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "dist/**/*"
+    ],
+    "scripts": {
+        "build": "node ./build.mjs",
+        "clean": "node ./clean.mjs",
+        "docs": "node ./docs.mjs"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "dependencies": {
+        "@perspective-dev/server": "workspace:^",
+        "stoppable": "catalog:",
+        "ws": "catalog:"
+    },
+    "engines": {
+        "node": ">=22"
+    },
+    "peerDependencies": {
+        "@clickhouse/client-web": "^1.12.0",
+        "@duckdb/duckdb-wasm": "^1.30.0"
+    },
+    "peerDependenciesMeta": {
+        "@clickhouse/client-web": {
+            "optional": true
+        },
+        "@duckdb/duckdb-wasm": {
+            "optional": true
+        }
+    },
+    "devDependencies": {
+        "@perspective-dev/esbuild-plugin": "workspace:^",
+        "@perspective-dev/metadata": "workspace:^",
+        "@perspective-dev/test": "workspace:^",
+        "@clickhouse/client-web": "catalog:",
+        "@duckdb/duckdb-wasm": "catalog:",
+        "@playwright/experimental-ct-react": "catalog:",
+        "@playwright/test": "catalog:",
+        "@types/node": "catalog:",
+        "@types/ws": "catalog:",
+        "@types/stoppable": "catalog:",
+        "apache-arrow": "catalog:",
+        "superstore-arrow": "catalog:",
+        "lodash": "catalog:",
+        "moment": "catalog:",
+        "pro_self_extracting_wasm": "catalog:",
+        "typedoc": "catalog:",
+        "typescript": "catalog:",
+        "web-worker": "catalog:",
+        "zx": "catalog:"
+    }
+}

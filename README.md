@@ -1,79 +1,182 @@
-![Perspective](https://github.com/finos/perspective/blob/master/docs/static/img/logo/logo-light.png?raw=true#gh-light-mode-only)
-![Perspective](https://github.com/finos/perspective/blob/master/docs/static/img/logo/logo-dark.png?raw=true#gh-dark-mode-only)
+<br />
 
-[![npm](https://img.shields.io/npm/v/@finos/perspective.svg?style=flat)](https://www.npmjs.com/package/@finos/perspective)
-[![PyPI](https://img.shields.io/pypi/v/perspective-python.svg?style=flat)](https://pypi.python.org/pypi/perspective-python)
-[![Build Status](https://dev.azure.com/finosfoundation/perspective/_apis/build/status/finos.perspective?branchName=master)](https://dev.azure.com/finosfoundation/perspective/_build/latest?definitionId=1&branchName=master)
-[![FINOS - Active](https://cdn.jsdelivr.net/gh/finos/contrib-toolbox@master/images/badge-active.svg)](https://finosfoundation.atlassian.net/wiki/display/FINOS/Active)
+<a href="https://perspective-dev.github.io">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="https://github.com/perspective-dev/perspective/raw/master/docs/static/svg/perspective-logo-dark.svg?raw=true">
+<img width="260" alt="Perspective" src="https://github.com/perspective-dev/perspective/raw/master/docs/static/svg/perspective-logo-light.svg?raw=true" />
+</picture>
+</a>
+<br/><br/>
 
-Perspective is an <i>interactive</i> analytics and data visualization component,
-which is especially well-suited for <i>large</i> and/or <i>streaming</i> datasets.
-Originally developed at J.P. Morgan and open-sourced through the
-[Fintech Open Source Foundation (FINOS)](https://www.finos.org/),
-Perspective makes it simple to build user-configurable
-analytics entirely in the browser, or in concert with Python and
-[Jupyterlab](https://jupyterlab.readthedocs.io/en/stable/).
-Use it to create reports, dashboards, notebooks and applications, with static
-data or streaming updates via [Apache Arrow](https://arrow.apache.org/).
+[![Build Status](https://img.shields.io/github/actions/workflow/status/perspective-dev/perspective/build.yaml?event=push&style=for-the-badge)](https://github.com/perspective-dev/perspective/actions/workflows/build.yaml)
+[![npm](https://img.shields.io/npm/v/@perspective-dev/client.svg?style=for-the-badge)](https://www.npmjs.com/package/@perspective-dev/client)
+[![PyPI](https://img.shields.io/pypi/v/perspective-python.svg?style=for-the-badge)](https://pypi.python.org/pypi/perspective-python)
+[![crates.io](https://img.shields.io/crates/v/perspective?style=for-the-badge)](https://crates.io/crates/perspective)
 
-- A fast, memory efficient streaming query engine, written in
-  C++ and compiled for both [WebAssembly](https://webassembly.org/) and
-  [Python](https://www.python.org/) with support for (read/write/stream)ing
-  [Apache Arrow](https://arrow.apache.org/), and a high-performance columnar
-  expression language based on [ExprTK](https://github.com/ArashPartow/exprtk).
+<!-- site:begin -->
 
-- A framework-agnostic User Interface
-  [Custom Element](https://developer.mozilla.org/en-US/docs/Web/Web_Components/Using_custom_elements),
-  powered either in-browser via WebWorker (WebAssembly) or virtually via
-  WebSocket server (Python/Node), as well as a suite of Datagrid and
-  [D3FC](https://d3fc.io/) Chart plugins.
+Perspective is an open-source data grid, pivot table and charting component for 
+large, real-time and streaming datasets. Build user-configurable reports, 
+dashboards, notebooks and embedded analytics applications, backed by a 
+high-performance streaming query engine that runs in-browser via WebAssembly or 
+server-side in Python, Node.js and Rust — or delegates to a database you 
+already have.
 
-- A [JupyterLab](https://jupyter.org/) widget and Python client library, for
-  interactive data analysis in a notebook, as well as _scalable_ production
-  [Voila](https://github.com/voila-dashboards/voila) and
-  [Holoviz](https://panel.holoviz.org/) applications.
+<!-- site:end -->
 
 <br/>
-<img width="770" src="https://github.com/finos/perspective/blob/gh-pages/img/demo_large.gif?raw=true">
+<a href="https://perspective-dev.github.io"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://perspective-dev.github.io/projects/dark/collage.png" />
+    <img alt="A collage of Perspective data grids, pivot tables, charts and maps" src="https://perspective-dev.github.io/projects/light/collage.png" />
+</picture></a>
 
-## Examples
+<!-- site:begin -->
 
-||||
-|:--|:--|:--|
-|Movies|Magic|NFT|
-|[![Movies](https://gist.githubusercontent.com/texodus/6b4dcebf65db4ebe4fe53a6de5ea0b48/raw/f56e588eed348aea579cf8fe757ce78c58779c82/thumbnail.png)](https://bl.ocks.org/texodus/6b4dcebf65db4ebe4fe53a6de5ea0b48)|[![Magic](https://perspective.finos.org/img/mtg_thumbnail.png)](https://texodus.github.io/mtg-perspective/?seasons-in-the-abyss-67)|[<img src="https://sc1f.github.io/pudgy-penguin-perspective/meta.png" width="230" height="120"></img>](https://sc1f.github.io/pudgy-penguin-perspective/)|
-|NYPD CCRB|Olympics|COVID|
-|[<img src="https://texodus.github.io/nypd-ccrb/preview.png" width="230" height="120"></img>](https://texodus.github.io/nypd-ccrb/)|[![Olympics](http://bl.ocks.org/texodus/raw/efd4a857aca9a52ab6cddbb6e1f701c9/c6c0fb7611ca742830e05cce667678c25b6f288a/thumbnail.png)](https://bl.ocks.org/texodus/efd4a857aca9a52ab6cddbb6e1f701c9)|[![COVID](https://gist.githubusercontent.com/texodus/e074d7d9e5783e680d35f565d2b4b32e/raw/7c2b8821333a5d6e90a8d0748ecb2062c798c5e6/thumbnail.png)](https://bl.ocks.org/texodus/e074d7d9e5783e680d35f565d2b4b32e)|
-|Custom Styles|BTC|Fractal|
-|[![Custom Styles](http://bl.ocks.org/texodus/raw/c42f3189699bd29cf20bbe7dce767b07/62d75a47e049602312ba2597bfd37eb032b156f0/thumbnail.png)](http://bl.ocks.org/texodus/c42f3189699bd29cf20bbe7dce767b07)|[<img src="https://sc1f.github.io/perspective-btc-liquidity/meta.png" width="230" height="120"></img>](https://sc1f.github.io/perspective-btc-liquidity/)|[![Fractal](https://bl.ocks.org/texodus/raw/5485f6b630b08d38218822e507f09f21/2e5f128865d1ffb4b73d1fdf59fcb6705d78071e/thumbnail.png)](https://bl.ocks.org/texodus/5485f6b630b08d38218822e507f09f21)|
-|Editable|Maps Airports|Streaming|
-|[![Editable](https://bl.ocks.org/texodus/raw/45b868833c9f456bd39a51e606412c5d/e590d237a5237790694946018680719c9fef56cb/thumbnail.png)](https://bl.ocks.org/texodus/45b868833c9f456bd39a51e606412c5d)|[![Maps Airpors](https://perspective.finos.org/img/airports_thumbnail.png)](https://bl.ocks.org/DevAndyLee/86b33055dbce1ccc709cb3238227bec1)|[![Streaming](https://bl.ocks.org/texodus/raw/9bec2f8041471bafc2c56db2272a9381/c69c2cfacb23015f3aaeab3555a0035702ffdb1c/thumbnail.png)](https://bl.ocks.org/texodus/9bec2f8041471bafc2c56db2272a9381)|
-|NYC Citibike|JupyterLab Plugin|Maps Citibike|
-|[![NYC Citibike](https://bl.ocks.org/texodus/raw/bc8d7e6f72e09c9dbd7424b4332cacad/f704ce53a3f453f8fe66bd9ff4ead831786384ea/thumbnail.png)](https://bl.ocks.org/texodus/bc8d7e6f72e09c9dbd7424b4332cacad)|[![JupyterLab Plugin](https://perspective.finos.org/img/jupyterlab.png)](http://beta.mybinder.org/v2/gh/finos/perspective/master?urlpath=lab/tree/examples/jupyter-notebooks)|[![Maps Citibike](https://perspective.finos.org/img/citibike_thumbnail.png)](http://bl.ocks.org/DevAndyLee/57720f373752cd405dbbceb6f22c7854)|
-|[Polygon.io](https://polygon.io)|CSV|Superstore|
-|[<img src="https://raw.githubusercontent.com/timkpaine/polygon-io-perspective/main/docs/img/screenshot.png" width="230" height="120">](https://timkpaine.github.io/polygon-io-perspective/)|[![CSV](https://bl.ocks.org/texodus/raw/02d8fd10aef21b19d6165cf92e43e668/5e78be024893aa651fcdfac816841d54777ccdec/thumbnail.png)](https://bl.ocks.org/texodus/02d8fd10aef21b19d6165cf92e43e668)|[![Superstore](https://bl.ocks.org/texodus/raw/803de90736a3641ad91c5c7a1b49d0a7/thumbnail.png)](https://bl.ocks.org/texodus/803de90736a3641ad91c5c7a1b49d0a7)|
+## Features
 
+- A data-reactive UI packaged as a
+  [Custom Element](https://developer.mozilla.org/en-US/docs/Web/Web_Components/Using_custom_elements),
+  with drag-and-drop query and layout configuration. Includes a virtual-scrolling,
+  editable data grid, WebGL charting engine with 15+ chart types, tile-based
+  geographic maps, full theme support, and [React](https://react.dev/) bindings.
 
+- A fast, memory-efficient streaming query engine written in C++ and compiled
+  for [WebAssembly](https://webassembly.org/) (including a 64-bit `memory64`
+  build for in-browser datasets larger than 4GB, and support for paging
+  columns to disk via OPFS in the browser or memory-mapped files natively),
+  [Python](https://www.python.org/) and [Rust](https://www.rust-lang.org/).
+  Tables update incrementally and views tick in real time, with reactive
+  joins across tables, a columnar expression language based on
+  [ExprTK](https://github.com/ArashPartow/exprtk), and read/write/streaming
+  support for [Apache Arrow](https://arrow.apache.org/), CSV and JSON.
 
+- A symmetric client/server architecture — the same Client API connects to an
+  engine in-process, in a Web Worker, or remotely over WebSocket, with server
+  bindings for Python (aiohttp, Starlette, Tornado), Node.js and Rust.
+  Datasets can be mirrored to the browser for fluid interaction or virtualized
+  server-side, streaming only what's visible.
 
+- Virtual servers that run Perspective's UI directly on external engines like
+  [DuckDB](https://duckdb.org/), [ClickHouse](https://clickhouse.com/),
+  [PostgreSQL](https://www.postgresql.org/) and
+  [Polars](https://pola.rs/), translating view configurations into native
+  queries — no ETL or data copy required.
 
+- A [Jupyter](https://jupyter.org/) widget built on
+  [anywidget](https://anywidget.dev/) and a Python client library for
+  interactive data analysis in JupyterLab and other notebook environments.
 
 ## Documentation
 
-* [Project Site](https://perspective.finos.org/)
-* [Table](https://perspective.finos.org/docs/md/table.html)
-* [View](https://perspective.finos.org/docs/md/view.html)
-* [Javascript User Guide](https://perspective.finos.org/docs/md/js.html)
-* [Python User Guide](https://perspective.finos.org/docs/md/python.html)
-* [Data Binding](https://perspective.finos.org/docs/md/table.html)
-* [Developer Guide](https://perspective.finos.org/docs/md/development.html)
-* [Perspective API](https://github.com/finos/perspective/blob/master/packages/perspective/README.md)
-* [Perspective Viewer API](https://github.com/finos/perspective/blob/master/packages/perspective-viewer/README.md)
-* [Perspective Python API](https://perspective.finos.org/docs/obj/perspective-python.html)
+- [Project Site](https://perspective-dev.github.io/)
+- [User Guide](https://perspective-dev.github.io/guide/)
+- JavaScript API
+    - [`@perspective-dev/react` React Component](https://perspective-dev.github.io/react/index.html)
+    - [`@perspective-dev/viewer` Web Component](https://perspective-dev.github.io/viewer/modules/perspective-viewer.html)
+    - [`@perspective-dev/client` Client (Browser)](https://perspective-dev.github.io/browser/modules/src_ts_perspective.browser.ts.html)
+    - [`@perspective-dev/client` Client (Node.js)](https://perspective-dev.github.io/node/modules/src_ts_perspective.node.ts.html)
+    - [`@perspective-dev/client` Clickhouse Virtual Server](https://perspective-dev.github.io/browser/modules/dist_esm_virtual_servers_clickhouse.js.html)
+    - [`@perspective-dev/client` DuckDB Virtual Server](https://perspective-dev.github.io/browser/modules/dist_esm_virtual_servers_duckdb.js.html)
+- Python API
+    - [`perspective`](https://perspective-dev.github.io/python/index.html)
+    - [`perspective.widget`](https://perspective-dev.github.io/python/perspective/widget.html)
+    - [`perspective.handlers.aiohttp`](https://perspective-dev.github.io/python/perspective/handlers/aiohttp.html)
+    - [`perspective.handlers.starlette`](https://perspective-dev.github.io/python/perspective/handlers/starlette.html)
+    - [`perspective.handlers.tornado`](https://perspective-dev.github.io/python/perspective/handlers/tornado.html)
+    - [`perspective.virtual_servers.clickhouse`](https://perspective-dev.github.io/python/perspective/virtual_servers/clickhouse.html)
+    - [`perspective.virtual_servers.duckdb`](https://perspective-dev.github.io/python/perspective/virtual_servers/duckdb.html)
+    - [`perspective.virtual_servers.postgres`](https://perspective-dev.github.io/python/perspective/virtual_servers/postgres.html)
+- Rust API
+    - [`perspective`](https://docs.rs/perspective/latest/perspective/)
 
-## Community
 
-* [`perspective-viewer-maps` OpenLayers/OpenStreetMap plugin](https://github.com/DevAndyLee/perspective-viewer-maps)
-* [Scott Logic / Perspective Plugin API - How to build a new plugin](https://blog.scottlogic.com/2019/04/23/perspective-plugin-api-how-to-build-a-new-plugin.html)
-* [Streaming, cross-sectional data visualization in Jupyterlab | Junyuan Tan, JupyterCon 2020](http://www.youtube.com/watch?v=IO-HJsGdleE)
+## Examples
 
+<table>
+<tbody>
+<tr>
+<td>Superstore</td><td>Workspace</td><td>Webcam</td>
+</tr>
+<tr>
+<td><a href="https://perspective-dev.github.io/?project=superstore"><picture><source media="(prefers-color-scheme: dark)" srcset="https://perspective-dev.github.io/projects/dark/superstore.png" /><img alt="Perspective example: superstore" src="https://perspective-dev.github.io/projects/light/superstore.png" /></picture></a></td>
+<td><a href="https://perspective-dev.github.io/?project=superstore-overview"><picture><source media="(prefers-color-scheme: dark)" srcset="https://perspective-dev.github.io/projects/dark/superstore-overview.png" /><img alt="Perspective example: superstore overview" src="https://perspective-dev.github.io/projects/light/superstore-overview.png" /></picture></a></td>
+<td><a href="https://perspective-dev.github.io/?project=webcam-video-wall"><picture><source media="(prefers-color-scheme: dark)" srcset="https://perspective-dev.github.io/projects/dark/webcam-video-wall.png" /><img alt="Perspective example: webcam video wall" src="https://perspective-dev.github.io/projects/light/webcam-video-wall.png" /></picture></a></td>
+</tr>
+<tr>
+<td>Raycasting</td><td>Market</td><td>NYPD</td>
+</tr>
+<tr>
+<td><a href="https://perspective-dev.github.io/?project=raycasting"><picture><source media="(prefers-color-scheme: dark)" srcset="https://perspective-dev.github.io/projects/dark/raycasting.png" /><img alt="Perspective example: raycasting" src="https://perspective-dev.github.io/projects/light/raycasting.png" /></picture></a></td>
+<td><a href="https://perspective-dev.github.io/?project=market-trading-desk"><picture><source media="(prefers-color-scheme: dark)" srcset="https://perspective-dev.github.io/projects/dark/market-trading-desk.png" /><img alt="Perspective example: market trading desk" src="https://perspective-dev.github.io/projects/light/market-trading-desk.png" /></picture></a></td>
+<td><a href="https://perspective-dev.github.io/?project=nypd-4"><picture><source media="(prefers-color-scheme: dark)" srcset="https://perspective-dev.github.io/projects/dark/nypd-4.png" /><img alt="Perspective example: nypd 4" src="https://perspective-dev.github.io/projects/light/nypd-4.png" /></picture></a></td>
+</tr>
+<tr>
+<td>Movies</td><td>Evictions</td><td>Fractal</td>
+</tr>
+<tr>
+<td><a href="https://perspective-dev.github.io/?project=movies"><picture><source media="(prefers-color-scheme: dark)" srcset="https://perspective-dev.github.io/projects/dark/movies.png" /><img alt="Perspective example: movies" src="https://perspective-dev.github.io/projects/light/movies.png" /></picture></a></td>
+<td><a href="https://perspective-dev.github.io/?project=evictions-2"><picture><source media="(prefers-color-scheme: dark)" srcset="https://perspective-dev.github.io/projects/dark/evictions-2.png" /><img alt="Perspective example: evictions 2" src="https://perspective-dev.github.io/projects/light/evictions-2.png" /></picture></a></td>
+<td><a href="https://perspective-dev.github.io/?project=fractal"><picture><source media="(prefers-color-scheme: dark)" srcset="https://perspective-dev.github.io/projects/dark/fractal.png" /><img alt="Perspective example: fractal" src="https://perspective-dev.github.io/projects/light/fractal.png" /></picture></a></td>
+</tr>
+</tbody>
+</table>
+
+## Media
+
+<table><tbody>
+<tr>
+<td><a href="https://github.com/timkpaine"><code>@timkpaine</code></a></td>
+<td><a href="https://github.com/timbess"><code>@timbess</code></a></td>
+<td><a href="https://github.com/sc1f"><code>@sc1f</code></a></td>
+</tr>
+<tr>
+<td><a href="https://www.youtube.com/watch?v=v5Y5ftlGNhU"><img width="240" alt="Perspective conference talk" src="https://img.youtube.com/vi/v5Y5ftlGNhU/0.jpg" /></a></td>
+<td><a href="https://www.youtube.com/watch?v=lDpIu4dnp78"><img width="240" alt="Perspective conference talk" src="https://img.youtube.com/vi/lDpIu4dnp78/0.jpg" /></a></td>
+<td><a href="https://www.youtube.com/watch?v=IO-HJsGdleE"><img width="240" alt="Perspective conference talk" src="https://img.youtube.com/vi/IO-HJsGdleE/0.jpg" /></a></td>
+</tr>
+<tr>
+<td><a href="https://github.com/texodus"><code>@texodus</code></a></td>
+<td><a href="https://github.com/texodus"><code>@texodus</code></a></td>
+<td></td>
+</tr>
+<tr>
+<td><a href="https://www.youtube.com/watch?v=no0qChjvdgQ"><img width="240" alt="Perspective conference talk" src="https://img.youtube.com/vi/no0qChjvdgQ/0.jpg" /></a></td>
+<td><a href="https://www.youtube.com/watch?v=0ut-ynvBpGI"><img width="240" alt="Perspective conference talk" src="https://img.youtube.com/vi/0ut-ynvBpGI/0.jpg" /></a></td>
+<td></td>
+</tr>
+</tbody></table><br/><br/>
+
+---
+
+
+<br/>
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="https://github.com/openjs-foundation/artwork/raw/master/openjs_foundation/openjs_foundation-logo-horizontal-white.svg?raw=true">
+<img width="200" alt="OpenJS Foundation" src="https://github.com/openjs-foundation/artwork/raw/master/openjs_foundation/openjs_foundation-logo-horizontal-black.svg?raw=true">
+</picture>
+<br/>
+<br/>
+<br/>
+
+The Perspective project is a member of the
+[The OpenJS Foundation](https://openjsf.org/).
+
+Copyright [OpenJS Foundation](https://openjsf.org) and Perspective contributors.
+All rights reserved. The [OpenJS Foundation](https://openjsf.org) has registered
+trademarks and uses trademarks. For a list of trademarks of the
+[OpenJS Foundation](https://openjsf.org), please see our
+[Trademark Policy](https://trademark-policy.openjsf.org/) and
+[Trademark List](https://trademark-list.openjsf.org/). Trademarks and logos not
+indicated on the
+[list of OpenJS Foundation trademarks](https://trademark-list.openjsf.org) are
+trademarks™ or registered® trademarks of their respective holders. Use of them
+does not imply any affiliation with or endorsement by them.
+
+[The OpenJS Foundation](https://openjsf.org/) |
+[Terms of Use](https://terms-of-use.openjsf.org/) |
+[Privacy Policy](https://privacy-policy.openjsf.org/) |
+[Bylaws](https://bylaws.openjsf.org/) |
+[Code of Conduct](https://code-of-conduct.openjsf.org) |
+[Trademark Policy](https://trademark-policy.openjsf.org/) |
+[Trademark List](https://trademark-list.openjsf.org/) |
+[Cookie Policy](https://www.linuxfoundation.org/cookies/)

@@ -1,0 +1,116 @@
+/* ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+ * ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+ * ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+ * ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+ * ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+ * ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+ * ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+ * ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+ * ┃ This file is part of the Perspective library, distributed under the terms ┃
+ * ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+ * ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ */
+
+@import url("https://fonts.googleapis.com/css?display=block&family=Open+Sans:400");
+@import "../../node_modules/@perspective-dev/viewer/dist/css/themes.css";
+
+@import "./app_shell.css";
+@import "./controls.css";
+@import "./modal.css";
+@import "./sidebar.css";
+@import "./sql_drawer.css";
+@import "./s3_form.css";
+@import "./project_gallery.css";
+@import "./about.css";
+
+/**
+ * The light palette is the BASE, so a page whose `data-theme` is unstamped
+ * still resolves a complete theme from CSS alone — the two dark blocks only
+ * redefine tokens. `data-theme` stays absent until the user picks a scheme
+ * (`data/theme.ts`), which is what keeps the first paint free of a flash
+ * while that module loads.
+ */
+:root {
+    --color-primary: #1b1b1d;
+    --color-error: #c33434;
+    --color-warning: #b07d1c;
+    --bg-color: #ffffff;
+    --bg-surface: #f4f4f5;
+    --text-color: #1b1b1d;
+    --text-muted: #666;
+    --border-color: #d4d4d6;
+    --font-mono:
+        "ui-monospace", "SFMono-Regular", "SF Mono", "Menlo", "Consolas",
+        "Liberation Mono", monospace;
+    --icon--sun--mask-image: url("../svg/sun-icon.svg");
+    --icon--moon--mask-image: url("../svg/moon-icon.svg");
+    --icon--collapse--mask-image: url("../svg/collapse-icon.svg");
+    color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --color-primary: #ffffff;
+        --color-error: #d64545;
+        --color-warning: #d6a145;
+        --bg-color: #1b1b1d;
+        --bg-surface: #242526;
+        --text-color: #ffffff;
+        --text-muted: #999;
+        --border-color: #61656e;
+        color-scheme: dark;
+    }
+}
+
+:root[data-theme="dark"] {
+    --color-primary: #ffffff;
+    --color-error: #d64545;
+    --color-warning: #d6a145;
+    --bg-color: #1b1b1d;
+    --bg-surface: #242526;
+    --text-color: #ffffff;
+    --text-muted: #999;
+    --border-color: #61656e;
+    color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+html {
+    background-color: var(--bg-color);
+    color: var(--text-color);
+}
+
+body {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-weight: 400;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+}
+
+a {
+    text-decoration: none;
+}
+
+button {
+    white-space: nowrap;
+}
+
+hr {
+    width: 100%;
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 0;
+}
+
+perspective-viewer {
+    text-align: initial;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+}
